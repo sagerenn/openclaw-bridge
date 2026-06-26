@@ -1,0 +1,26 @@
+{
+  "name": "openclaw-bridge",
+  "version": "1.0.0",
+  "description": "Universal WebSocket bridge server for openclaw channel plugins — dynamically loads installed plugins",
+  "type": "module",
+  "main": "dist/server.js",
+  "bin": {
+    "openclaw-bridge": "dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsc --watch",
+    "install:liangzimixin": "npm install liangzimixin",
+    "install:weixin": "npm install @tencent-weixin/openclaw-weixin"
+  },
+  "dependencies": {
+    "openclaw": "^2026.6.10",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3"
+  }
+}
