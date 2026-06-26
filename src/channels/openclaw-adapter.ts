@@ -30,6 +30,7 @@ import {
   buildPluginApi,
   type DeliverInterceptor,
 } from "./runtime-shim.js";
+import { toQrImageDataUrl } from "./qr-util.js";
 import { rootLogger } from "../util/logger.js";
 
 const log = rootLogger.child("openclaw-adapter");
@@ -294,8 +295,13 @@ export class OpenClawChannelAdapter implements ChannelAdapter {
         force: params.force,
       });
 
+      // Plugins may return the QR *value* (the URL/text to scan) rather than an
+      // image data URL (e.g. weixin's qrcodeUrl is a plain https login URL).
+      // Normalize it into a PNG data URL so the browser can render it directly.
+      const qrDataUrl = await toQrImageDataUrl(result.qrDataUrl ?? result.qrcodeUrl);
+
       return {
-        qrDataUrl: result.qrDataUrl,
+        qrDataUrl,
         message: result.message ?? "QR code generated",
         sessionKey: result.sessionKey,
       };
@@ -331,11 +337,14 @@ export class OpenClawChannelAdapter implements ChannelAdapter {
         });
       }
 
+      // A refreshed QR may come back as a plain URL/text — normalize it too.
+      const qrDataUrl = await toQrImageDataUrl(result.qrDataUrl ?? result.qrcodeUrl);
+
       return {
         connected: result.connected ?? false,
         message: result.message ?? "",
         accountId: result.accountId,
-        qrDataUrl: result.qrDataUrl,
+        qrDataUrl,
       };
     } catch (err) {
       log.error("loginWithQrWait failed", { channelId: this.channelId, error: String(err) });
