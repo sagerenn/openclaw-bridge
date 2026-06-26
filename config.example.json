@@ -24,12 +24,9 @@
     "openclaw-weixin": {
       "enabled": true,
       "accounts": {
-        "primary": {
-          "token": "YOUR_WEIXIN_BOT_TOKEN",
-          "baseUrl": "https://ilinkai.weixin.qq.com",
-          "cdnBaseUrl": "https://novac2c.cdn.weixin.qq.com/c2c"
-        }
-      }
+        "default": {}
+      },
+      "_comment": "WeChat uses QR code login — leave accounts empty and visit /plugin/openclaw-weixin/default/qr to scan"
     }
   },
   "logging": {

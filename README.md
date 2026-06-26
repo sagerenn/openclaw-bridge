@@ -19,6 +19,7 @@ Client ──[WebSocket]──▶ Bridge Server ──[ChannelPlugin API]──�
 - **Envelope protocol** — structured JSON envelope protocol with correlation IDs for request/response matching
 - **Contact persistence** — automatically records user IDs from inbound messages to `contacts.json`
 - **Online notifications** — sends "🟢 Bridge is back online" to all known contacts on restart
+- **QR code login** — HTTP API and WS protocol for plugins that support QR auth (e.g. WeChat)
 
 ## Quick Start
 
@@ -178,6 +179,8 @@ All messages use a JSON envelope format:
 | `subscribe` | `{ channel, accountId?, filter?: { fromUserIds? } }` | `channel_status` |
 | `unsubscribe` | `{ channel, accountId? }` | — |
 | `list_channels` | `{ verbose? }` | `channels_list` |
+| `qr_start` | `{ accountId?, force? }` | `qr_result` |
+| `qr_wait` | `{ accountId?, sessionKey?, timeoutMs? }` | `qr_result` |
 | `ping` | `{}` | `pong` |
 
 ### Server → Client
@@ -190,6 +193,7 @@ All messages use a JSON envelope format:
 | `channels_list` | `{ channels: { [id]: { label, accounts: { [id]: { status, detail?, error? } } } } }` | Response to `list_channels` |
 | `send_ack` | `{ requestId, messageId? }` | Successful outbound send |
 | `send_error` | `{ requestId, code, message }` | Failed outbound send |
+| `qr_result` | `{ connected?, qrDataUrl?, message, sessionKey?, accountId? }` | QR login start or wait result |
 | `pong` | `{}` | Response to `ping` |
 
 ### Subscription model
@@ -239,7 +243,7 @@ src/
 ├── protocol/
 │   └── messages.ts                # WS protocol envelope types and helpers
 ├── channels/
-│   ├── channel-adapter.ts         # ChannelAdapter interface (generic contract)
+│   ├── channel-adapter.ts         # ChannelAdapter interface (generic contract + QR login)
 │   ├── channel-manager.ts         # Plugin discovery + adapter lifecycle management
 │   ├── openclaw-adapter.ts        # OpenClawChannelAdapter — drives any plugin generically
 │   ├── plugin-loader.ts           # Dynamic plugin loading with CJS-ESM interop
@@ -247,13 +251,83 @@ src/
 ├── contacts/
 │   └── contact-store.ts           # Contact persistence — records user IDs, sends online notifications
 ├── server/
-│   ├── bridge-server.ts           # Core WS server — message routing and client management
+│   ├── bridge-server.ts           # Core WS+HTTP server — message routing, client management, QR API
 │   ├── client-connection.ts       # Single WS client with subscriptions and filters
 │   └── client-registry.ts         # Client tracking and broadcast routing
 ├── util/
 │   └── logger.ts                  # Structured logger
 └── test/
     └── e2e-test.ts                # End-to-end test
+```
+
+## HTTP API
+
+The bridge exposes HTTP endpoints for plugin operations alongside the WebSocket server.
+
+### QR Code Login
+
+For plugins that support QR code authentication (e.g., WeChat), the bridge provides HTTP endpoints:
+
+#### `GET /plugin/:channelId/:accountId/qr`
+
+Starts a QR login flow and returns an HTML page with the QR code image. The page auto-polls for login status.
+
+Query params:
+- `force=true` — Force a new QR even if one is already active
+
+Open in a browser to scan the QR code with your phone.
+
+#### `GET /plugin/:channelId/:accountId/qr/json`
+
+Starts a QR login flow and returns the result as JSON (for programmatic use).
+
+Response:
+```json
+{
+  "qrDataUrl": "data:image/png;base64,...",
+  "message": "Scan QR code to login",
+  "sessionKey": "abc-123"
+}
+```
+
+#### `GET /plugin/:channelId/:accountId/qr/status`
+
+Polls the QR login status. This is a long-poll endpoint — it blocks until the login completes or times out.
+
+Query params:
+- `sessionKey=xxx` — Session key from the `/qr` or `/qr/json` response (required)
+- `timeoutMs=120000` — Maximum wait time in milliseconds (default: 120000)
+
+Response (waiting):
+```json
+{
+  "connected": false,
+  "message": "Waiting for scan..."
+}
+```
+
+Response (success):
+```json
+{
+  "connected": true,
+  "message": "Login successful",
+  "accountId": "bot-123456"
+}
+```
+
+After a successful QR login, the bridge automatically starts the account.
+
+### Example: WeChat QR Login
+
+```bash
+# 1. Start QR login (returns JSON with QR data URL and session key)
+curl http://localhost:9300/plugin/openclaw-weixin/default/qr/json
+
+# 2. Or open in browser for a friendly scan page
+open http://localhost:9300/plugin/openclaw-weixin/default/qr
+
+# 3. Poll for status (use sessionKey from step 1)
+curl "http://localhost:9300/plugin/openclaw-weixin/default/qr/status?sessionKey=abc-123"
 ```
 
 ## Contact Persistence & Online Notifications

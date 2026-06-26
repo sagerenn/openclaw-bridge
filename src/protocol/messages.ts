@@ -40,6 +40,8 @@ export enum BridgeMessageType {
   UNSUBSCRIBE = "unsubscribe",
   LIST_CHANNELS = "list_channels",
   PING = "ping",
+  QR_START = "qr_start",
+  QR_WAIT = "qr_wait",
 
   // Server -> Client
   INBOUND_MESSAGE = "inbound_message",
@@ -49,6 +51,7 @@ export enum BridgeMessageType {
   SEND_ERROR = "send_error",
   PONG = "pong",
   WELCOME = "welcome",
+  QR_RESULT = "qr_result",
 }
 
 // ─── Client -> Server Payloads ───────────────────────────────────────────────
@@ -93,6 +96,35 @@ export interface SubscribePayload {
 export interface ListChannelsPayload {
   /** If true, include detailed status per account */
   verbose?: boolean;
+}
+
+export interface QrStartPayload {
+  /** Account ID to start QR login for (optional, plugin may auto-assign) */
+  accountId?: string;
+  /** Force a new QR even if one is already active */
+  force?: boolean;
+}
+
+export interface QrWaitPayload {
+  /** Account ID being waited on */
+  accountId?: string;
+  /** Session key from a prior qr_start response */
+  sessionKey?: string;
+  /** Maximum time to wait in milliseconds */
+  timeoutMs?: number;
+}
+
+export interface QrResultPayload {
+  /** Whether the login completed (for qr_wait responses) */
+  connected?: boolean;
+  /** Data URL of the QR code image */
+  qrDataUrl?: string;
+  /** Human-readable status message */
+  message: string;
+  /** Session key (from qr_start) to pass back in qr_wait */
+  sessionKey?: string;
+  /** Account ID assigned by the plugin */
+  accountId?: string;
 }
 
 // ─── Server -> Client Payloads ───────────────────────────────────────────────

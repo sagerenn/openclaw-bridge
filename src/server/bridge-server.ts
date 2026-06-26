@@ -1,8 +1,9 @@
 /**
  * BridgeServer — the core WebSocket server that bridges clients to channel backends.
+ * Also exposes HTTP API routes for plugin operations (e.g. QR code login).
  */
 
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import type { ChannelManager } from "../channels/channel-manager.js";
 import type { ClientRegistry } from "./client-registry.js";
@@ -24,6 +25,9 @@ import {
   type SendErrorPayload,
   type WelcomePayload,
   type NormalizedInboundMessage,
+  type QrStartPayload,
+  type QrWaitPayload,
+  type QrResultPayload,
 } from "../protocol/messages.js";
 import { rootLogger } from "../util/logger.js";
 
@@ -62,6 +66,9 @@ export class BridgeServer {
 
     // Handle new WS connections
     this.wss.on("connection", (ws, req) => this.handleConnection(ws, req));
+
+    // Handle HTTP API requests (for QR code and other plugin operations)
+    this.httpServer.on("request", (req, res) => this.handleHttpRequest(req, res));
 
     // Start listening
     const host = this.config.server.host ?? "0.0.0.0";
@@ -177,6 +184,12 @@ export class BridgeServer {
         break;
       case BridgeMessageType.PING:
         client.send(makeEnvelope(BridgeMessageType.PONG, "*", {}, { id: envelope.id }));
+        break;
+      case BridgeMessageType.QR_START:
+        this.handleQrStart(client, envelope);
+        break;
+      case BridgeMessageType.QR_WAIT:
+        this.handleQrWait(client, envelope);
         break;
       default:
         log.warn("Unknown message type from client", { clientId: client.id, type: envelope.type });
@@ -334,6 +347,208 @@ export class BridgeServer {
     client.send(makeEnvelope(BridgeMessageType.CHANNELS_LIST, "*", payload, { id: envelope.id }));
   }
 
+  /** Handle QR_START from a WS client */
+  private async handleQrStart(client: ClientConnection, envelope: BridgeEnvelope): Promise<void> {
+    const payload = envelope.payload as QrStartPayload;
+    const channelId = envelope.channel;
+    const accountId = payload.accountId ?? envelope.accountId;
+
+    try {
+      const result = await this.channelManager.loginWithQrStart(channelId, {
+        accountId,
+        force: payload.force,
+      });
+
+      const qrPayload: QrResultPayload = {
+        qrDataUrl: result.qrDataUrl,
+        message: result.message,
+        sessionKey: result.sessionKey,
+      };
+      client.send(makeEnvelope(BridgeMessageType.QR_RESULT, channelId, qrPayload, { accountId }));
+    } catch (err) {
+      const qrPayload: QrResultPayload = {
+        message: `QR start failed: ${String(err)}`,
+      };
+      client.send(makeEnvelope(BridgeMessageType.QR_RESULT, channelId, qrPayload, { accountId }));
+    }
+  }
+
+  /** Handle QR_WAIT from a WS client */
+  private async handleQrWait(client: ClientConnection, envelope: BridgeEnvelope): Promise<void> {
+    const payload = envelope.payload as QrWaitPayload;
+    const channelId = envelope.channel;
+    const accountId = payload.accountId ?? envelope.accountId;
+
+    try {
+      const result = await this.channelManager.loginWithQrWait(channelId, {
+        accountId,
+        sessionKey: payload.sessionKey,
+        timeoutMs: payload.timeoutMs,
+      });
+
+      const qrPayload: QrResultPayload = {
+        connected: result.connected,
+        message: result.message,
+        accountId: result.accountId,
+        qrDataUrl: result.qrDataUrl,
+      };
+      client.send(makeEnvelope(BridgeMessageType.QR_RESULT, channelId, qrPayload, { accountId }));
+    } catch (err) {
+      const qrPayload: QrResultPayload = {
+        message: `QR wait failed: ${String(err)}`,
+      };
+      client.send(makeEnvelope(BridgeMessageType.QR_RESULT, channelId, qrPayload, { accountId }));
+    }
+  }
+
+  // ─── HTTP API ────────────────────────────────────────────────────────────────
+
+  /**
+   * Handle HTTP API requests for plugin operations.
+   *
+   * Routes:
+   *   GET /plugin/:channelId/:accountId/qr         — Start QR login, return QR image
+   *   GET /plugin/:channelId/:accountId/qr/status   — Poll QR login status
+   *   GET /plugin/:channelId/:accountId/qr/json     — Start QR login, return JSON
+   */
+  private handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
+    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    const path = url.pathname;
+
+    // Only handle /plugin/ routes — everything else is 404 (WS handles the rest)
+    if (!path.startsWith("/plugin/")) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Not found" }));
+      return;
+    }
+
+    const parts = path.split("/").filter(Boolean); // ["plugin", channelId, accountId, ...rest]
+    if (parts.length < 3) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Path format: /plugin/:channelId/:accountId/qr" }));
+      return;
+    }
+
+    const [, channelId, accountId, ...rest] = parts;
+    const subPath = "/" + rest.join("/");
+
+    if (subPath === "/qr") {
+      this.handleQrHttpRequest(channelId, accountId, url, req, res);
+    } else if (subPath === "/qr/status") {
+      this.handleQrStatusHttpRequest(channelId, accountId, url, req, res);
+    } else if (subPath === "/qr/json") {
+      this.handleQrJsonHttpRequest(channelId, accountId, url, req, res);
+    } else {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: `Unknown plugin route: ${subPath}` }));
+    }
+  }
+
+  /**
+   * GET /plugin/:channelId/:accountId/qr
+   * Start QR login and return the QR code as an HTML page with the image embedded.
+   * This is the "scan-friendly" endpoint — opens in a browser.
+   */
+  private async handleQrHttpRequest(
+    channelId: string,
+    accountId: string,
+    url: URL,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const force = url.searchParams.get("force") === "true";
+
+    try {
+      const result = await this.channelManager.loginWithQrStart(channelId, {
+        accountId,
+        force,
+      });
+
+      if (!result.qrDataUrl) {
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "No QR code available", message: result.message }));
+        return;
+      }
+
+      // Return an HTML page that displays the QR code and auto-polls for status
+      const html = buildQrPageHtml(channelId, accountId, result.qrDataUrl, result.message, result.sessionKey);
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(html);
+    } catch (err) {
+      log.error("QR HTTP start failed", { channelId, accountId, error: String(err) });
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: String(err) }));
+    }
+  }
+
+  /**
+   * GET /plugin/:channelId/:accountId/qr/json
+   * Start QR login and return the result as JSON (for programmatic use).
+   */
+  private async handleQrJsonHttpRequest(
+    channelId: string,
+    accountId: string,
+    url: URL,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const force = url.searchParams.get("force") === "true";
+
+    try {
+      const result = await this.channelManager.loginWithQrStart(channelId, {
+        accountId,
+        force,
+      });
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        qrDataUrl: result.qrDataUrl,
+        message: result.message,
+        sessionKey: result.sessionKey,
+      }));
+    } catch (err) {
+      log.error("QR JSON start failed", { channelId, accountId, error: String(err) });
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: String(err) }));
+    }
+  }
+
+  /**
+   * GET /plugin/:channelId/:accountId/qr/status
+   * Poll the QR login status. Pass ?sessionKey=xxx from the start response.
+   * This is a long-poll endpoint — it blocks until the login completes or times out.
+   */
+  private async handleQrStatusHttpRequest(
+    channelId: string,
+    accountId: string,
+    url: URL,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const sessionKey = url.searchParams.get("sessionKey") ?? undefined;
+    const timeoutMs = parseInt(url.searchParams.get("timeoutMs") ?? "120000", 10);
+
+    try {
+      const result = await this.channelManager.loginWithQrWait(channelId, {
+        accountId,
+        sessionKey,
+        timeoutMs,
+      });
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        connected: result.connected,
+        message: result.message,
+        accountId: result.accountId,
+        qrDataUrl: result.qrDataUrl,
+      }));
+    } catch (err) {
+      log.error("QR status poll failed", { channelId, accountId, error: String(err) });
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: String(err) }));
+    }
+  }
+
   /** Route an inbound message from a channel to subscribed clients */
   private routeInboundMessage(msg: NormalizedInboundMessage): void {
     const payload: InboundMessagePayload = {
@@ -430,4 +645,125 @@ export class BridgeServer {
       }
     }
   }
+}
+
+// ─── QR Page HTML ─────────────────────────────────────────────────────────────
+
+/**
+ * Build an HTML page that displays a QR code and auto-polls for login status.
+ * This provides a browser-friendly way to scan QR codes for plugin auth.
+ */
+function buildQrPageHtml(
+  channelId: string,
+  accountId: string,
+  qrDataUrl: string,
+  message: string,
+  sessionKey?: string,
+): string {
+  const escapedSessionKey = sessionKey
+    ? JSON.stringify(sessionKey).replace(/</g, "\\u003c")
+    : '""';
+  const escapedChannelId = channelId.replace(/</g, "&lt;");
+  const escapedAccountId = accountId.replace(/</g, "&lt;");
+  const escapedMessage = message.replace(/</g, "&lt;").replace(/"/g, "&quot;");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QR Login — ${escapedChannelId}/${escapedAccountId}</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f172a; color: #e2e8f0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-height: 100vh; padding: 2rem;
+  }
+  .card {
+    background: #1e293b; border-radius: 16px; padding: 2rem;
+    box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+    max-width: 420px; width: 100%; text-align: center;
+  }
+  h1 { font-size: 1.25rem; margin-bottom: 0.5rem; color: #f1f5f9; }
+  .subtitle { font-size: 0.875rem; color: #94a3b8; margin-bottom: 1.5rem; }
+  .qr-container {
+    background: #fff; border-radius: 12px; padding: 16px;
+    display: inline-block; margin-bottom: 1rem;
+  }
+  .qr-container img { display: block; width: 256px; height: 256px; }
+  .status {
+    font-size: 0.875rem; padding: 0.75rem 1rem; border-radius: 8px;
+    margin-top: 1rem;
+  }
+  .status.waiting { background: #1e3a5f; color: #93c5fd; }
+  .status.success { background: #14532d; color: #86efac; }
+  .status.error { background: #7f1d1d; color: #fca5a5; }
+  .spinner {
+    display: inline-block; width: 16px; height: 16px;
+    border: 2px solid #93c5fd; border-top-color: transparent;
+    border-radius: 50%; animation: spin 1s linear infinite;
+    vertical-align: middle; margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .meta { font-size: 0.75rem; color: #64748b; margin-top: 1.5rem; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Scan QR Code to Login</h1>
+  <p class="subtitle">${escapedChannelId} / ${escapedAccountId}</p>
+  <div class="qr-container">
+    <img src="${qrDataUrl}" alt="QR Code" id="qr-img">
+  </div>
+  <div id="status" class="status waiting">
+    <span class="spinner"></span> Waiting for scan...
+  </div>
+  <p class="meta">Message: ${escapedMessage}</p>
+</div>
+<script>
+(function() {
+  var channelId = ${JSON.stringify(channelId).replace(/</g, "\\u003c")};
+  var accountId = ${JSON.stringify(accountId).replace(/</g, "\\u003c")};
+  var sessionKey = ${escapedSessionKey};
+  var statusEl = document.getElementById("status");
+  var qrImg = document.getElementById("qr-img");
+  var pollInterval;
+
+  function poll() {
+    var url = "/plugin/" + encodeURIComponent(channelId) + "/" + encodeURIComponent(accountId) + "/qr/status?timeoutMs=30000";
+    if (sessionKey) url += "&sessionKey=" + encodeURIComponent(sessionKey);
+
+    fetch(url)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.connected) {
+          statusEl.className = "status success";
+          statusEl.innerHTML = "\\u2705 Connected! Account: " + (data.accountId || accountId);
+          clearInterval(pollInterval);
+        } else if (data.qrDataUrl) {
+          // QR was refreshed — update the image
+          qrImg.src = data.qrDataUrl;
+          statusEl.className = "status waiting";
+          statusEl.innerHTML = '<span class="spinner"></span> QR refreshed, waiting for scan...';
+        } else {
+          statusEl.className = "status waiting";
+          statusEl.innerHTML = '<span class="spinner"></span> ' + (data.message || "Waiting for scan...");
+        }
+      })
+      .catch(function(err) {
+        statusEl.className = "status error";
+        statusEl.innerHTML = "\\u26a0\\ufe0f Poll error: " + err.message + " (retrying...)";
+      });
+  }
+
+  // Start polling every 5 seconds
+  pollInterval = setInterval(poll, 5000);
+  // Initial poll after 2 seconds
+  setTimeout(poll, 2000);
+})();
+</script>
+</body>
+</html>`;
 }

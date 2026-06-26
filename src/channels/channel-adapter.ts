@@ -71,6 +71,20 @@ export interface ChannelAdapter {
    * List configured account IDs for this channel.
    */
   listAccounts(): string[];
+
+  /**
+   * Start a QR code login flow for an account.
+   * Returns a QR code image and session key for polling.
+   * Only supported by plugins that implement gateway.loginWithQrStart().
+   */
+  loginWithQrStart(params: { accountId?: string; force?: boolean }): Promise<QrStartResult>;
+
+  /**
+   * Wait for a QR code login to complete (polling).
+   * Pass the sessionKey from loginWithQrStart().
+   * Only supported by plugins that implement gateway.loginWithQrWait().
+   */
+  loginWithQrWait(params: { accountId?: string; sessionKey?: string; timeoutMs?: number }): Promise<QrWaitResult>;
 }
 
 // ─── Parameter Types ─────────────────────────────────────────────────────────
@@ -102,6 +116,28 @@ export interface SendTypingParams {
 export interface SendResult {
   messageId: string;
   chatId?: string;
+}
+
+// ─── QR Login Types ──────────────────────────────────────────────────────────
+
+export interface QrStartResult {
+  /** Data URL of the QR code image (e.g. data:image/png;base64,...) */
+  qrDataUrl?: string;
+  /** Human-readable status message */
+  message: string;
+  /** Session key to pass back to loginWithQrWait (plugin-specific) */
+  sessionKey?: string;
+}
+
+export interface QrWaitResult {
+  /** Whether the login completed successfully */
+  connected: boolean;
+  /** Human-readable status message */
+  message: string;
+  /** The account ID assigned by the plugin (may differ from requested ID) */
+  accountId?: string;
+  /** Updated QR data URL if the QR was refreshed during waiting */
+  qrDataUrl?: string;
 }
 
 // ─── Callback Types ──────────────────────────────────────────────────────────

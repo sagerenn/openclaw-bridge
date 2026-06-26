@@ -157,12 +157,14 @@ this.updateStatus(accountId, "connected", "Plugin gateway started");
 
 ### 5. BridgeServer (`bridge-server.ts`)
 
-The core WS server handles:
+The core WS+HTTP server handles:
 - **Connection management** — accepts WS upgrades, enforces `maxClients`, sends `welcome` on connect
 - **Message routing** — dispatches client messages by type to handler methods
 - **Inbound routing** — broadcasts inbound messages from channels to subscribed clients
 - **Status routing** — broadcasts channel status changes to subscribed clients
 - **Heartbeat** — pings clients periodically, terminates stale connections
+- **HTTP API** — serves plugin operations (QR code login) via REST endpoints
+- **QR login** — WS protocol (`qr_start`, `qr_wait`, `qr_result`) and HTTP routes (`/plugin/:channelId/:accountId/qr`)
 
 **Startup order:** HTTP server starts **before** channel accounts. This ensures WS clients can connect immediately while backends are still connecting.
 
@@ -223,6 +225,47 @@ The `ContactStore` persists known user IDs from inbound messages to `contacts.js
 - `server.ts` main — after starting channel accounts, calls `sendOnlineNotifications()` which iterates all persisted contacts and sends "🟢 Bridge is back online" via each adapter's `sendText()`
 - Graceful shutdown — `contactStore.flush()` is called before server stop to ensure all contacts are persisted
 
+### 9. QR Code Login (`channel-adapter.ts` + `bridge-server.ts`)
+
+The bridge supports QR code authentication for plugins that implement `gateway.loginWithQrStart()` and `gateway.loginWithQrWait()` (e.g., WeChat). This is fully generic — any plugin with these gateway methods works automatically.
+
+**ChannelAdapter interface additions:**
+- `loginWithQrStart({ accountId?, force? })` → `{ qrDataUrl?, message, sessionKey? }`
+- `loginWithQrWait({ accountId?, sessionKey?, timeoutMs? })` → `{ connected, message, accountId?, qrDataUrl? }`
+
+**OpenClawChannelAdapter implementation:**
+Delegates directly to `plugin.gateway.loginWithQrStart()` and `plugin.gateway.loginWithQrWait()`. If the plugin doesn't implement these methods, a clear error is thrown.
+
+**Two-phase flow:**
+1. **Start** — `loginWithQrStart()` fetches a QR code from the backend and returns a data URL + session key
+2. **Wait** — `loginWithQrWait()` long-polls the backend until the user scans the QR and confirms login
+
+**HTTP API routes:**
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `/plugin/:channelId/:accountId/qr` | GET | Start QR login, return HTML page with QR image + auto-polling |
+| `/plugin/:channelId/:accountId/qr/json` | GET | Start QR login, return JSON (programmatic use) |
+| `/plugin/:channelId/:accountId/qr/status` | GET | Poll QR login status (long-poll, pass `?sessionKey=xxx`) |
+
+**WS protocol messages:**
+
+| Type | Direction | Payload |
+|------|-----------|---------|
+| `qr_start` | Client → Server | `{ accountId?, force? }` |
+| `qr_wait` | Client → Server | `{ accountId?, sessionKey?, timeoutMs? }` |
+| `qr_result` | Server → Client | `{ connected?, qrDataUrl?, message, sessionKey?, accountId? }` |
+
+**Auto-start after login:**
+When `loginWithQrWait()` returns `connected: true`, the `ChannelManager` fires the `onQrLoginSuccess` callback. The server uses this to automatically start the account with its configured credentials, so no manual restart is needed.
+
+**HTML QR page:**
+The `/qr` endpoint returns a self-contained HTML page that:
+- Displays the QR code image
+- Auto-polls `/qr/status` every 5 seconds
+- Shows real-time status updates (waiting → scanned → connected)
+- Updates the QR image if the backend refreshes it
+
 ## Message Flow
 
 ### Outbound (Client → Backend)
@@ -261,6 +304,30 @@ The `ContactStore` persists known user IDs from inbound messages to `contacts.js
 5. Plugin sends the notification to the backend
 ```
 
+### QR Code Login (WeChat and other QR-auth plugins)
+
+```
+HTTP flow:
+1. Client: GET /plugin/openclaw-weixin/default/qr
+2. BridgeServer → ChannelManager.loginWithQrStart("openclaw-weixin", { accountId: "default" })
+3. OpenClawChannelAdapter → plugin.gateway.loginWithQrStart({ accountId: "default" })
+4. Plugin fetches QR from backend → returns { qrDataUrl, message, sessionKey }
+5. BridgeServer returns HTML page with QR image + auto-polling script
+6. Browser polls: GET /plugin/openclaw-weixin/default/qr/status?sessionKey=xxx
+7. BridgeServer → ChannelManager.loginWithQrWait("openclaw-weixin", { sessionKey })
+8. OpenClawChannelAdapter → plugin.gateway.loginWithQrWait({ sessionKey })
+9. Plugin long-polls backend until scan confirmed → returns { connected: true, accountId }
+10. ChannelManager.onQrLoginSuccess callback → auto-starts the account
+
+WS flow:
+1. Client sends: { type: "qr_start", channel: "openclaw-weixin", payload: { accountId: "default" } }
+2. BridgeServer.handleQrStart() → same adapter call as above
+3. Server responds: { type: "qr_result", payload: { qrDataUrl, message, sessionKey } }
+4. Client sends: { type: "qr_wait", channel: "openclaw-weixin", payload: { sessionKey } }
+5. BridgeServer.handleQrWait() → same adapter call as above
+6. Server responds: { type: "qr_result", payload: { connected: true, message, accountId } }
+```
+
 ## Key Design Decisions
 
 ### No plugin-specific code
@@ -292,3 +359,20 @@ The wire protocol uses structured envelopes with correlation IDs, version fields
 ### Contact persistence with debounced flush
 
 Contacts are recorded on every inbound message but flushed to disk with a 1-second debounce. This avoids writing to disk on every message while ensuring contacts are persisted within a reasonable window. On graceful shutdown, `flush()` is called explicitly to catch any remaining writes.
+
+### Generic QR login via gateway adapter
+
+QR code login is driven through the standard `ChannelGatewayAdapter` interface (`loginWithQrStart`, `loginWithQrWait`), not through plugin-specific code. This means:
+- Any plugin that implements these gateway methods gets QR support automatically
+- The bridge doesn't need to know about WeChat's specific QR flow
+- Both HTTP and WS interfaces are provided for different use cases (browser vs programmatic)
+- Auto-start after login ensures the account is immediately usable without restart
+
+### Dual HTTP + WS interface for QR login
+
+The QR login is exposed via both HTTP and WS:
+- **HTTP** (`/plugin/:channelId/:accountId/qr`) — browser-friendly, returns an HTML page with auto-polling. Ideal for end users scanning QR codes.
+- **HTTP JSON** (`/plugin/:channelId/:accountId/qr/json`) — programmatic access, returns raw JSON. Ideal for custom UIs or scripts.
+- **WS** (`qr_start` / `qr_wait`) — for clients already connected via WebSocket. Avoids a separate HTTP connection.
+
+The HTML page is self-contained with embedded JavaScript for auto-polling, so it works without any client-side dependencies.

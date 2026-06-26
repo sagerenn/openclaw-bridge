@@ -570,6 +570,109 @@ Response:
 
 Clients that don't respond to pings within 2× `clientHeartbeatMs` (default: 60 seconds) are terminated.
 
+## Step 13: QR Code Login (WeChat and other QR-auth plugins)
+
+Some channel plugins (e.g., WeChat) require scanning a QR code to authenticate. The bridge provides both HTTP and WebSocket interfaces for QR login.
+
+### HTTP: Browser-friendly QR page
+
+Open this URL in a browser to display the QR code:
+
+```
+http://localhost:9300/plugin/openclaw-weixin/default/qr
+```
+
+The page shows the QR code image and automatically polls for login status. Once you scan the QR code with your phone and confirm, the page updates to show "Connected!" and the account is automatically started.
+
+### HTTP: Programmatic JSON API
+
+For custom UIs or scripts:
+
+```bash
+# Start QR login — returns QR data URL and session key
+curl http://localhost:9300/plugin/openclaw-weixin/default/qr/json
+
+# Poll for status (use sessionKey from the start response)
+curl "http://localhost:9300/plugin/openclaw-weixin/default/qr/status?sessionKey=YOUR_SESSION_KEY"
+```
+
+### WebSocket: QR login via WS protocol
+
+If you're already connected via WebSocket, use the WS protocol:
+
+```json
+// Step 1: Start QR login
+{
+  "v": 1,
+  "id": "qr-1",
+  "type": "qr_start",
+  "channel": "openclaw-weixin",
+  "accountId": "default",
+  "payload": { "accountId": "default" }
+}
+
+// Response: qr_result with QR data URL and session key
+{
+  "v": 1,
+  "id": "br-xxx",
+  "type": "qr_result",
+  "channel": "openclaw-weixin",
+  "accountId": "default",
+  "payload": {
+    "qrDataUrl": "data:image/png;base64,...",
+    "message": "Scan QR code to login",
+    "sessionKey": "abc-123"
+  }
+}
+
+// Step 2: Wait for scan (long-poll)
+{
+  "v": 1,
+  "id": "qr-2",
+  "type": "qr_wait",
+  "channel": "openclaw-weixin",
+  "accountId": "default",
+  "payload": { "sessionKey": "abc-123" }
+}
+
+// Response: connected!
+{
+  "v": 1,
+  "id": "br-xxx",
+  "type": "qr_result",
+  "channel": "openclaw-weixin",
+  "accountId": "default",
+  "payload": {
+    "connected": true,
+    "message": "Login successful",
+    "accountId": "bot-123456"
+  }
+}
+```
+
+After a successful QR login, the bridge automatically starts the account — no restart needed.
+
+### First-time WeChat setup
+
+1. Install the WeChat plugin: `npm install @tencent-weixin/openclaw-weixin`
+2. Add a placeholder config in `config.json`:
+   ```json
+   {
+     "channels": {
+       "openclaw-weixin": {
+         "enabled": true,
+         "accounts": {
+           "default": {}
+         }
+       }
+     }
+   }
+   ```
+3. Start the server: `npm start`
+4. Open `http://localhost:9300/plugin/openclaw-weixin/default/qr` in a browser
+5. Scan the QR code with WeChat
+6. The account is automatically configured and started
+
 ## Running the E2E Test
 
 The project includes an end-to-end test that verifies the full message round-trip:
@@ -610,6 +713,18 @@ This happens when a plugin's `register()` function was never called. The bridge 
 The plugin's `gateway.startAccount()` may have failed. Check the server logs for errors. Common causes:
 - Invalid credentials
 - Network connectivity issues to the backend
+- Backend service is down
+- For WeChat: the account may need QR login first (see "Account needs setup" log message)
+
+### "Plugin does not support QR login"
+
+The plugin's gateway adapter doesn't implement `loginWithQrStart()` or `loginWithQrWait()`. Not all plugins use QR code authentication. Check the plugin's documentation for its setup method.
+
+### QR code fetch fails
+
+The bridge server couldn't reach the plugin's backend to fetch the QR code. Common causes:
+- Network connectivity issues (e.g., `ilinkai.weixin.qq.com` unreachable)
+- Firewall blocking outbound HTTPS requests
 - Backend service is down
 
 ### Client not receiving inbound messages

@@ -21,6 +21,8 @@ import type {
   SendResult,
   InboundMessageCallback,
   StatusChangeCallback,
+  QrStartResult,
+  QrWaitResult,
 } from "./channel-adapter.js";
 import type { NormalizedInboundMessage, ChannelStatus } from "../protocol/messages.js";
 import {
@@ -275,6 +277,69 @@ export class OpenClawChannelAdapter implements ChannelAdapter {
       } catch (err) {
         log.debug("sendTyping failed (non-critical)", { channelId: this.channelId, accountId, error: String(err) });
       }
+    }
+  }
+
+  async loginWithQrStart(params: { accountId?: string; force?: boolean }): Promise<QrStartResult> {
+    const gateway = this.plugin.gateway;
+    if (!gateway?.loginWithQrStart) {
+      throw new Error(`Plugin ${this.channelId} does not support QR login (no gateway.loginWithQrStart)`);
+    }
+
+    log.info("Calling gateway.loginWithQrStart()", { channelId: this.channelId, accountId: params.accountId });
+
+    try {
+      const result = await gateway.loginWithQrStart({
+        accountId: params.accountId,
+        force: params.force,
+      });
+
+      return {
+        qrDataUrl: result.qrDataUrl,
+        message: result.message ?? "QR code generated",
+        sessionKey: result.sessionKey,
+      };
+    } catch (err) {
+      log.error("loginWithQrStart failed", { channelId: this.channelId, error: String(err) });
+      throw err;
+    }
+  }
+
+  async loginWithQrWait(params: { accountId?: string; sessionKey?: string; timeoutMs?: number }): Promise<QrWaitResult> {
+    const gateway = this.plugin.gateway;
+    if (!gateway?.loginWithQrWait) {
+      throw new Error(`Plugin ${this.channelId} does not support QR login wait (no gateway.loginWithQrWait)`);
+    }
+
+    log.info("Calling gateway.loginWithQrWait()", {
+      channelId: this.channelId,
+      accountId: params.accountId,
+      hasSessionKey: !!params.sessionKey,
+    });
+
+    try {
+      const result = await gateway.loginWithQrWait({
+        accountId: params.accountId,
+        timeoutMs: params.timeoutMs,
+        sessionKey: params.sessionKey,
+      });
+
+      if (result.connected) {
+        log.info("QR login succeeded", {
+          channelId: this.channelId,
+          accountId: result.accountId ?? params.accountId,
+        });
+      }
+
+      return {
+        connected: result.connected ?? false,
+        message: result.message ?? "",
+        accountId: result.accountId,
+        qrDataUrl: result.qrDataUrl,
+      };
+    } catch (err) {
+      log.error("loginWithQrWait failed", { channelId: this.channelId, error: String(err) });
+      throw err;
     }
   }
 

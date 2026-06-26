@@ -66,6 +66,27 @@ async function main(): Promise<void> {
   const contactStore = new ContactStore(resolvedConfigPath);
   channelManager.setContactStore(contactStore);
 
+  // When QR login succeeds, auto-start the account
+  channelManager.setOnQrLoginSuccess(async (channelId, accountId) => {
+    log.info("QR login succeeded — auto-starting account", { channelId, accountId });
+    const channelConfig = (config as any).channels?.[channelId];
+    const accountConfig = channelConfig?.accounts?.[accountId];
+    if (accountConfig) {
+      const mergedConfig = {
+        ...accountConfig,
+        ...(channelConfig.transport ?? {}),
+      };
+      try {
+        await channelManager.startAccount(channelId, accountId, mergedConfig);
+        log.info("Auto-started account after QR login", { channelId, accountId });
+      } catch (err) {
+        log.error("Failed to auto-start account after QR login", { channelId, accountId, error: String(err) });
+      }
+    } else {
+      log.warn("No config found for QR-logged account, cannot auto-start", { channelId, accountId });
+    }
+  });
+
   // Discover and load channel adapters from installed plugins
   const adapters = await loadChannelAdapters();
   for (const [channelId, adapter] of adapters) {
@@ -136,8 +157,19 @@ async function startConfiguredChannels(
         };
         await channelManager.startAccount(channelId, accountId, mergedConfig);
         log.info("Started channel account", { channelId, accountId });
-      } catch (err) {
-        log.error("Failed to start channel account", { channelId, accountId, error: String(err) });
+      } catch (err: any) {
+        const errMsg = String(err);
+        // If the account needs QR login (e.g. weixin "not configured: missing token"),
+        // log a helpful message instead of treating it as a fatal error
+        if (errMsg.includes("not configured") || errMsg.includes("missing token")) {
+          log.info("Account needs setup — use QR login to configure", {
+            channelId,
+            accountId,
+            hint: `GET /plugin/${channelId}/${accountId}/qr`,
+          });
+        } else {
+          log.error("Failed to start channel account", { channelId, accountId, error: errMsg });
+        }
       }
     }
   }

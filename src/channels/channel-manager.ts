@@ -5,7 +5,7 @@
 
 import { readdirSync, existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { ChannelAdapter } from "./channel-adapter.js";
+import type { ChannelAdapter, QrStartResult, QrWaitResult } from "./channel-adapter.js";
 import type { ChannelStatus, NormalizedInboundMessage } from "../protocol/messages.js";
 import type { ContactStore } from "../contacts/contact-store.js";
 import { rootLogger } from "../util/logger.js";
@@ -131,10 +131,16 @@ export class ChannelManager {
   private messageCallbacks: ((msg: NormalizedInboundMessage) => void)[] = [];
   private statusCallbacks: ((status: ChannelStatus) => void)[] = [];
   private contactStore?: ContactStore;
+  private onQrLoginSuccess?: (channelId: string, accountId: string) => Promise<void>;
 
   /** Set the contact store for recording inbound senders */
   setContactStore(store: ContactStore): void {
     this.contactStore = store;
+  }
+
+  /** Set callback invoked when a QR login succeeds — used to auto-start the account */
+  setOnQrLoginSuccess(callback: (channelId: string, accountId: string) => Promise<void>): void {
+    this.onQrLoginSuccess = callback;
   }
 
   /** Register a channel adapter */
@@ -224,5 +230,34 @@ export class ChannelManager {
   /** Register a global status change callback */
   onStatusChange(callback: (status: ChannelStatus) => void): void {
     this.statusCallbacks.push(callback);
+  }
+
+  /** Start a QR code login flow for a channel account */
+  async loginWithQrStart(channelId: string, params: { accountId?: string; force?: boolean }): Promise<QrStartResult> {
+    const adapter = this.adapters.get(channelId);
+    if (!adapter) throw new Error(`No adapter registered for channel: ${channelId}`);
+    return adapter.loginWithQrStart(params);
+  }
+
+  /** Wait for a QR code login to complete */
+  async loginWithQrWait(channelId: string, params: { accountId?: string; sessionKey?: string; timeoutMs?: number }): Promise<QrWaitResult> {
+    const adapter = this.adapters.get(channelId);
+    if (!adapter) throw new Error(`No adapter registered for channel: ${channelId}`);
+    const result = await adapter.loginWithQrWait(params);
+
+    // If login succeeded, trigger the callback to auto-start the account
+    if (result.connected && this.onQrLoginSuccess) {
+      const effectiveAccountId = result.accountId ?? params.accountId ?? "default";
+      // Fire-and-forget — don't block the response
+      this.onQrLoginSuccess(channelId, effectiveAccountId).catch((err) => {
+        log.warn("Failed to auto-start account after QR login", {
+          channelId,
+          accountId: effectiveAccountId,
+          error: String(err),
+        });
+      });
+    }
+
+    return result;
   }
 }
