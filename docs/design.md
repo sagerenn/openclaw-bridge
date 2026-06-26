@@ -192,6 +192,37 @@ interface ChannelSectionConfig {
 
 Account credentials are passed through to the plugin's `gateway.startAccount()` without validation by the bridge. The `transport` field is merged into each account config — useful for shared settings like custom API URLs.
 
+### 8. Contact Store (`contacts/contact-store.ts`)
+
+The `ContactStore` persists known user IDs from inbound messages to `contacts.json` (stored alongside `config.json`).
+
+**Key operations:**
+- `recordContact({ userId, channel, accountId, displayName })` — records a new contact or updates `lastSeenAt` for existing ones. Returns `true` if the contact is new.
+- `getContactsForAccount(channel, accountId)` — returns all contacts for a specific channel account.
+- `getActiveAccounts()` — returns all unique `channel:accountId` pairs that have contacts.
+- `flush()` — writes contacts to disk (debounced automatically via `scheduleFlush()`).
+
+**Storage format:**
+```json
+{
+  "contacts": {
+    "channel:accountId:userId": {
+      "userId": "...",
+      "channel": "liangzimixin",
+      "accountId": "default",
+      "displayName": "Alice",
+      "firstSeenAt": 1719400000000,
+      "lastSeenAt": 1719400000000
+    }
+  }
+}
+```
+
+**Integration points:**
+- `ChannelManager.registerAdapter()` — when an adapter emits an inbound message, the manager calls `contactStore.recordContact()` with the sender's info
+- `server.ts` main — after starting channel accounts, calls `sendOnlineNotifications()` which iterates all persisted contacts and sends "🟢 Bridge is back online" via each adapter's `sendText()`
+- Graceful shutdown — `contactStore.flush()` is called before server stop to ensure all contacts are persisted
+
 ## Message Flow
 
 ### Outbound (Client → Backend)
@@ -213,9 +244,21 @@ Account credentials are passed through to the plugin's `gateway.startAccount()` 
 2. Plugin calls createReplyDispatcherWithTyping({ deliver, ctx })
 3. Runtime shim intercepts deliver() → calls onDeliver()
 4. OpenClawChannelAdapter.emitDeliverAsInbound() → normalizes message
-5. ChannelManager message callbacks → BridgeServer.routeInboundMessage()
+5. ChannelManager message callbacks:
+   a. ContactStore.recordContact() — persists sender to contacts.json
+   b. BridgeServer.routeInboundMessage() → ClientRegistry.broadcast()
 6. ClientRegistry.broadcast("liangzimixin", "default", envelope, senderId)
 7. Each subscribed client with matching filter receives the message
+```
+
+### Online Notification (on restart)
+
+```
+1. Server starts, loads contacts.json via ContactStore
+2. Channel accounts start and connect
+3. sendOnlineNotifications() iterates all persisted contacts
+4. For each contact, adapter.sendText({ to: userId, text: "🟢 Bridge is back online" })
+5. Plugin sends the notification to the backend
 ```
 
 ## Key Design Decisions
@@ -245,3 +288,7 @@ The wire protocol uses structured envelopes with correlation IDs, version fields
 - Request/response matching via `id` field
 - Protocol versioning for future compatibility
 - Type-safe payload handling on both sides
+
+### Contact persistence with debounced flush
+
+Contacts are recorded on every inbound message but flushed to disk with a 1-second debounce. This avoids writing to disk on every message while ensuring contacts are persisted within a reasonable window. On graceful shutdown, `flush()` is called explicitly to catch any remaining writes.

@@ -450,6 +450,8 @@ Once subscribed, inbound messages from the backend arrive as `inbound_message`:
 }
 ```
 
+**The sender is automatically recorded.** When an inbound message arrives, the bridge persists the sender's user ID to `contacts.json`. This enables the online notification feature on restart.
+
 ### Media inbound messages
 
 ```json
@@ -475,7 +477,54 @@ Once subscribed, inbound messages from the backend arrive as `inbound_message`:
 }
 ```
 
-## Step 10: Unsubscribe
+## Step 10: Contact Persistence & Online Notifications
+
+### How contacts are recorded
+
+Every time an inbound message arrives, the bridge automatically records the sender to `contacts.json` (stored alongside `config.json`). The file looks like:
+
+```json
+{
+  "contacts": {
+    "liangzimixin:default:3c641fe588c14faf90802e72a09c1a44": {
+      "userId": "3c641fe588c14faf90802e72a09c1a44",
+      "channel": "liangzimixin",
+      "accountId": "default",
+      "displayName": "Alice",
+      "firstSeenAt": 1719400000000,
+      "lastSeenAt": 1719400000000
+    }
+  }
+}
+```
+
+Contacts are deduplicated by `channel:accountId:userId` — if the same user sends another message, only `lastSeenAt` is updated.
+
+### Online notifications on restart
+
+When the server restarts, it loads `contacts.json` and sends an online notification to every persisted contact:
+
+```
+[INFO] Loaded contacts {"count":1,"path":"/path/to/contacts.json"}
+[INFO] Sending online notifications {"channel":"liangzimixin","accountId":"default","contactCount":1}
+[INFO] Online notification sent {"channel":"liangzimixin","accountId":"default","userId":"3c641fe588c14faf90802e72a09c1a44"}
+```
+
+Each contact receives the message: **🟢 Bridge is back online**
+
+This means your contacts will know immediately when the bridge is available again after a restart.
+
+### Resetting contacts
+
+To clear all contacts, simply delete `contacts.json`:
+
+```bash
+rm contacts.json
+```
+
+The file will be recreated automatically when new inbound messages arrive.
+
+## Step 11: Unsubscribe
 
 Stop receiving messages from a channel account:
 
@@ -492,7 +541,7 @@ Stop receiving messages from a channel account:
 }
 ```
 
-## Step 11: Keep-Alive (Ping/Pong)
+## Step 12: Keep-Alive (Ping/Pong)
 
 The server sends periodic ping frames. If you're using a WS library that auto-responds to pings (most do), no action is needed. Otherwise, you can send explicit pings:
 

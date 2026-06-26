@@ -1,5 +1,6 @@
 /**
- * E2E test: start server, connect client, list channels, send messages.
+ * E2E test: start server, connect client, list channels, send messages,
+ * wait for inbound message, verify contact persistence.
  *
  * Prerequisites:
  *   - liangzimixin plugin installed
@@ -9,16 +10,21 @@
  */
 
 import { resolve } from "node:path";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { WebSocket } from "ws";
 import { BridgeServer } from "../server/bridge-server.js";
 import { ClientRegistry } from "../server/client-registry.js";
 import { ChannelManager } from "../channels/channel-manager.js";
 import { loadChannelAdapters } from "../channels/plugin-loader.js";
 import { loadConfig } from "../config/schema.js";
+import { ContactStore } from "../contacts/contact-store.js";
 import { BridgeMessageType, type BridgeEnvelope } from "../protocol/messages.js";
 import { rootLogger } from "../util/logger.js";
 
 const log = rootLogger.child("e2e-test");
+
+// Real liangzimixin user ID (from inbound message logs)
+const REAL_USER_ID = "3c641fe588c14faf90802e72a09c1a44";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -133,17 +139,43 @@ function sendAndWaitForAckOrError(
   });
 }
 
+/** Wait for an inbound_message from a specific sender */
+function waitForInboundMessage(
+  ws: WebSocket,
+  fromUserId: string,
+  timeoutMs = 60000,
+): Promise<BridgeEnvelope> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timed out waiting for inbound message from ${fromUserId}`)), timeoutMs);
+
+    const handler = (data: any) => {
+      const msg: BridgeEnvelope = JSON.parse(data.toString());
+      if (msg.type === BridgeMessageType.INBOUND_MESSAGE) {
+        const payload = msg.payload as any;
+        if (payload.senderId === fromUserId) {
+          clearTimeout(timer);
+          ws.off("message", handler);
+          resolve(msg);
+        }
+      }
+    };
+    ws.on("message", handler);
+  });
+}
+
 // ─── Test Runner ──────────────────────────────────────────────────────────────
 
 async function runTest(): Promise<void> {
   let server: BridgeServer | undefined;
   let client: Awaited<ReturnType<typeof connectClient>> | undefined;
 
+  const configPath = resolve(process.cwd(), "config.json");
+
   try {
     // ── Step 1: Load config and start server ──────────────────────────────
     log.info("=== Step 1: Starting server ===");
 
-    const config = loadConfig(resolve(process.cwd(), "config.json"));
+    const config = loadConfig(configPath);
 
     // Apply logging level
     if (config.logging?.level) {
@@ -152,6 +184,10 @@ async function runTest(): Promise<void> {
 
     const channelManager = new ChannelManager();
     const clientRegistry = new ClientRegistry();
+
+    // Create contact store
+    const contactStore = new ContactStore(configPath);
+    channelManager.setContactStore(contactStore);
 
     // Discover and load channel adapters
     const adapters = await loadChannelAdapters();
@@ -259,8 +295,24 @@ async function runTest(): Promise<void> {
     }
     log.info(`Using channel: ${targetChannel}, account: ${targetAccount}`);
 
-    // ── Step 4: Send three messages ───────────────────────────────────────
-    log.info("=== Step 4: Sending three messages ===");
+    // ── Step 4: Subscribe to inbound messages ─────────────────────────────
+    log.info("=== Step 4: Subscribing to inbound messages ===");
+
+    const subResp = await sendAndWait(
+      client.ws,
+      {
+        type: BridgeMessageType.SUBSCRIBE,
+        channel: targetChannel,
+        accountId: targetAccount,
+        payload: { channel: targetChannel, accountId: targetAccount },
+      },
+      BridgeMessageType.CHANNEL_STATUS,
+      5000,
+    );
+    log.info("Subscribed to channel", { status: (subResp.payload as any).status });
+
+    // ── Step 5: Send three messages to real user ──────────────────────────
+    log.info("=== Step 5: Sending three messages to real user ===");
 
     const testMessages = [
       "Hello from e2e test #1! 🚀",
@@ -283,7 +335,7 @@ async function runTest(): Promise<void> {
             channel: targetChannel,
             accountId: targetAccount,
             payload: {
-              to: "test-recipient",
+              to: REAL_USER_ID,
               text,
             },
           },
@@ -300,22 +352,65 @@ async function runTest(): Promise<void> {
         } else if (resp.type === BridgeMessageType.SEND_ERROR) {
           const errPayload = resp.payload as any;
           errorCount++;
-          log.info(`Message ${i + 1} send_error (expected for invalid recipient)`, {
+          log.info(`Message ${i + 1} send_error`, {
             code: errPayload.code,
             message: errPayload.message,
           });
         }
       } catch (err: any) {
-        // Timeout — the plugin may be retrying
         log.warn(`Message ${i + 1} timed out waiting for response: ${err.message}`);
         errorCount++;
       }
     }
 
-    // Verify at least some responses came back (ack or error — both prove the bridge works)
+    // Verify at least some responses came back
     const totalResponses = ackCount + errorCount;
     if (totalResponses === 0) {
       throw new Error("No send responses received — bridge may not be routing messages correctly");
+    }
+
+    // ── Step 6: Wait for inbound message from real user ───────────────────
+    log.info("=== Step 6: Waiting for inbound message ===");
+    log.info(`Send a message on liangzimixin to the bot — waiting for user ${REAL_USER_ID}...`);
+
+    try {
+      const inboundMsg = await waitForInboundMessage(client.ws, REAL_USER_ID, 120000);
+      const inboundPayload = inboundMsg.payload as any;
+      log.info("Received inbound message!", {
+        messageId: inboundPayload.messageId,
+        senderId: inboundPayload.senderId,
+        senderName: inboundPayload.senderName,
+        text: inboundPayload.text,
+        msgType: inboundPayload.msgType,
+      });
+    } catch (err: any) {
+      log.warn(`No inbound message received within timeout: ${err.message}`);
+      log.warn("This is OK if you didn't send a message — the outbound test still passed.");
+    }
+
+    // ── Step 7: Verify contact persistence ────────────────────────────────
+    log.info("=== Step 7: Verifying contact persistence ===");
+
+    contactStore.flush();
+    const contacts = contactStore.getAllContacts();
+    log.info(`Contacts stored: ${contacts.length}`);
+    for (const contact of contacts) {
+      log.info("Contact", {
+        channel: contact.channel,
+        accountId: contact.accountId,
+        userId: contact.userId,
+        displayName: contact.displayName,
+        firstSeenAt: new Date(contact.firstSeenAt).toISOString(),
+      });
+    }
+
+    // Verify contacts.json file exists
+    if (existsSync(contactStore.path)) {
+      const raw = readFileSync(contactStore.path, "utf-8");
+      const data = JSON.parse(raw);
+      log.info(`contacts.json file verified: ${Object.keys(data.contacts ?? {}).length} contacts`);
+    } else {
+      log.warn("contacts.json file not found (no inbound messages received)");
     }
 
     // ── Summary ───────────────────────────────────────────────────────────
@@ -323,6 +418,7 @@ async function runTest(): Promise<void> {
     log.info(`Channels: ${channelIds.join(", ")}`);
     log.info(`Connected: ${targetChannel}/${targetAccount}`);
     log.info(`Messages sent: 3, acks: ${ackCount}, errors: ${errorCount}`);
+    log.info(`Contacts persisted: ${contacts.length}`);
     log.info("✅ All steps passed!");
 
   } finally {

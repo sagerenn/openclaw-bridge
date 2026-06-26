@@ -26,6 +26,7 @@ import { ClientRegistry } from "./server/client-registry.js";
 import { ChannelManager } from "./channels/channel-manager.js";
 import { loadChannelAdapters } from "./channels/plugin-loader.js";
 import { loadConfig, type BridgeConfig } from "./config/schema.js";
+import { ContactStore } from "./contacts/contact-store.js";
 import { rootLogger } from "./util/logger.js";
 
 const log = rootLogger.child("main");
@@ -47,7 +48,8 @@ function parseArgs(): { config?: string } {
 
 async function main(): Promise<void> {
   const { config: configPath } = parseArgs();
-  const config = loadConfig(configPath ? resolve(configPath) : undefined);
+  const resolvedConfigPath = configPath ? resolve(configPath) : undefined;
+  const config = loadConfig(resolvedConfigPath);
 
   // Apply logging level
   if (config.logging?.level) {
@@ -59,6 +61,10 @@ async function main(): Promise<void> {
   // Create core components
   const channelManager = new ChannelManager();
   const clientRegistry = new ClientRegistry();
+
+  // Create contact store — persists known user IDs for online notifications
+  const contactStore = new ContactStore(resolvedConfigPath);
+  channelManager.setContactStore(contactStore);
 
   // Discover and load channel adapters from installed plugins
   const adapters = await loadChannelAdapters();
@@ -79,9 +85,13 @@ async function main(): Promise<void> {
   // Then start configured channel accounts (may take time for backend connections)
   await startConfiguredChannels(config, channelManager);
 
+  // Send online notification to all persisted contacts
+  await sendOnlineNotifications(channelManager, contactStore);
+
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     log.info(`Received ${signal}, shutting down...`);
+    contactStore.flush();
     await server.stop();
     process.exit(0);
   };
@@ -137,3 +147,50 @@ main().catch((err) => {
   log.error("Fatal error", { error: String(err) });
   process.exit(1);
 });
+
+/**
+ * Send an "online" notification to all persisted contacts.
+ * Called after startup so contacts know the bridge is back.
+ */
+async function sendOnlineNotifications(
+  channelManager: ChannelManager,
+  contactStore: ContactStore
+): Promise<void> {
+  const activeAccounts = contactStore.getActiveAccounts();
+  if (activeAccounts.length === 0) {
+    log.info("No persisted contacts — skipping online notifications");
+    return;
+  }
+
+  for (const { channel, accountId } of activeAccounts) {
+    const adapter = channelManager.getAdapter(channel);
+    if (!adapter) {
+      log.warn("No adapter for contact's channel, skipping online notifications", { channel });
+      continue;
+    }
+
+    const contacts = contactStore.getContactsForAccount(channel, accountId);
+    const status = channelManager.getStatus(channel, accountId);
+    if (status.state !== "connected") {
+      log.info("Channel not connected, skipping online notifications", { channel, accountId });
+      continue;
+    }
+
+    log.info("Sending online notifications", { channel, accountId, contactCount: contacts.length });
+
+    for (const contact of contacts) {
+      try {
+        await adapter.sendText({
+          to: contact.userId,
+          text: "🟢 Bridge is back online",
+          accountId,
+        });
+        log.info("Online notification sent", { channel, accountId, userId: contact.userId });
+      } catch (err) {
+        log.warn("Failed to send online notification", {
+          channel, accountId, userId: contact.userId, error: String(err),
+        });
+      }
+    }
+  }
+}

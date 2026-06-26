@@ -7,6 +7,7 @@ import { readdirSync, existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { ChannelAdapter } from "./channel-adapter.js";
 import type { ChannelStatus, NormalizedInboundMessage } from "../protocol/messages.js";
+import type { ContactStore } from "../contacts/contact-store.js";
 import { rootLogger } from "../util/logger.js";
 
 const log = rootLogger.child("channel-manager");
@@ -129,6 +130,12 @@ export class ChannelManager {
   private statusCache = new Map<string, ChannelStatus>();
   private messageCallbacks: ((msg: NormalizedInboundMessage) => void)[] = [];
   private statusCallbacks: ((status: ChannelStatus) => void)[] = [];
+  private contactStore?: ContactStore;
+
+  /** Set the contact store for recording inbound senders */
+  setContactStore(store: ContactStore): void {
+    this.contactStore = store;
+  }
 
   /** Register a channel adapter */
   registerAdapter(adapter: ChannelAdapter): void {
@@ -138,6 +145,17 @@ export class ChannelManager {
         ...this.getStatus(msg.channel, msg.accountId),
         lastInboundAt: Date.now(),
       });
+
+      // Record the sender as a known contact
+      if (this.contactStore && msg.senderId) {
+        this.contactStore.recordContact({
+          userId: msg.senderId,
+          channel: msg.channel,
+          accountId: msg.accountId,
+          displayName: msg.senderName,
+        });
+      }
+
       for (const cb of this.messageCallbacks) cb(msg);
     });
     adapter.onStatusChange((status) => {

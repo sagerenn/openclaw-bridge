@@ -144,3 +144,6 @@ vite.config.ts.timestamp-*
 
 # Config with real credentials
 config.json
+
+# Persisted contacts (contains user IDs)
+contacts.json

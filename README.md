@@ -17,6 +17,8 @@ Client ──[WebSocket]──▶ Bridge Server ──[ChannelPlugin API]──�
 - **Subscription model** — WS clients subscribe to specific channel accounts and only receive relevant messages
 - **Sender filtering** — optionally filter inbound messages by sender ID
 - **Envelope protocol** — structured JSON envelope protocol with correlation IDs for request/response matching
+- **Contact persistence** — automatically records user IDs from inbound messages to `contacts.json`
+- **Online notifications** — sends "🟢 Bridge is back online" to all known contacts on restart
 
 ## Quick Start
 
@@ -242,6 +244,8 @@ src/
 │   ├── openclaw-adapter.ts        # OpenClawChannelAdapter — drives any plugin generically
 │   ├── plugin-loader.ts           # Dynamic plugin loading with CJS-ESM interop
 │   └── runtime-shim.ts            # Minimal openclaw runtime shim (no full framework)
+├── contacts/
+│   └── contact-store.ts           # Contact persistence — records user IDs, sends online notifications
 ├── server/
 │   ├── bridge-server.ts           # Core WS server — message routing and client management
 │   ├── client-connection.ts       # Single WS client with subscriptions and filters
@@ -251,6 +255,36 @@ src/
 └── test/
     └── e2e-test.ts                # End-to-end test
 ```
+
+## Contact Persistence & Online Notifications
+
+The bridge automatically records the sender of every inbound message to `contacts.json` (stored alongside `config.json`). This file is gitignored.
+
+When the server restarts, it sends an online notification ("🟢 Bridge is back online") to all persisted contacts whose channel accounts are connected.
+
+**How it works:**
+1. User sends a message to the bot on any channel
+2. Bridge records the user ID, channel, and account to `contacts.json`
+3. On next server restart, after channels connect, the bridge sends "🟢 Bridge is back online" to each contact
+4. Contacts are deduplicated by `channel:accountId:userId` key
+
+**`contacts.json` format:**
+```json
+{
+  "contacts": {
+    "liangzimixin:default:user-abc123": {
+      "userId": "user-abc123",
+      "channel": "liangzimixin",
+      "accountId": "default",
+      "displayName": "Alice",
+      "firstSeenAt": 1719400000000,
+      "lastSeenAt": 1719400000000
+    }
+  }
+}
+```
+
+> **Note:** This file is auto-managed — you don't need to edit it manually. To reset contacts, simply delete `contacts.json`.
 
 ## Adding a New Channel Plugin
 
