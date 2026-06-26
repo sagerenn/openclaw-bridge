@@ -19,6 +19,7 @@ import { discoverPlugins } from "./channel-manager.js";
 import type { ChannelAdapter } from "./channel-adapter.js";
 import { OpenClawChannelAdapter } from "./openclaw-adapter.js";
 import { buildPluginApi } from "./runtime-shim.js";
+import { patchLarkPlugin } from "../util/patch-lark-plugin.js";
 import { rootLogger } from "../util/logger.js";
 
 const log = rootLogger.child("plugin-loader");
@@ -169,6 +170,17 @@ function isChannelPluginLike(obj: any): boolean {
  */
 export async function loadChannelAdapters(): Promise<Map<string, ChannelAdapter>> {
   const adapters = new Map<string, ChannelAdapter>();
+
+  // Self-heal: the published @larksuite/openclaw-lark ships CJS files that use
+  // import.meta (ESM-only), which breaks loading under Node's syntax detection.
+  // Re-apply the patch at startup in case postinstall didn't run (e.g. the
+  // plugin was installed after the fact, or dist/ wasn't built yet).
+  try {
+    patchLarkPlugin();
+  } catch (err) {
+    log.warn("Lark plugin self-heal patch failed (non-fatal)", { error: String(err) });
+  }
+
   const discovered = discoverPlugins();
 
   for (const plugin of discovered) {

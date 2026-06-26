@@ -36,7 +36,15 @@ npm install
 # Install the channels you need
 npm install liangzimixin
 npm install @tencent-weixin/openclaw-weixin
+npm install @larksuite/openclaw-lark
 ```
+
+> **Note:** `@larksuite/openclaw-lark` ships CJS files that use `import.meta`
+> (ESM-only), which breaks loading under Node's syntax-based module detection.
+> The bridge auto-patches this on `postinstall` and again at startup, so no
+> manual steps are needed. If you install the plugin directly, run
+> `npm run patch:lark` (or just restart the bridge).
+
 
 ### 3. Configure
 
