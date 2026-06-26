@@ -110,26 +110,42 @@ export class OpenClawChannelAdapter implements ChannelAdapter {
       connected: false,
     };
 
-    try {
-      // Call the plugin's gateway.startAccount(ctx)
-      const gateway = this.plugin.gateway;
-      if (gateway?.startAccount) {
-        log.info("Calling gateway.startAccount()", { channelId: this.channelId, accountId });
-        await gateway.startAccount(ctx);
-      } else {
-        log.warn("Plugin has no gateway.startAccount() — cannot start backend connection", {
-          channelId: this.channelId,
-          accountId,
-        });
-      }
+    this.handles.set(accountId, handle);
 
+    // Call the plugin's gateway.startAccount(ctx)
+    // NOTE: Some plugins (e.g., liangzimixin) block startAccount() until
+    // the abort signal fires. We fire-and-forget the gateway start and
+    // mark the account as connected once the plugin logs readiness.
+    const gateway = this.plugin.gateway;
+    if (gateway?.startAccount) {
+      log.info("Calling gateway.startAccount()", { channelId: this.channelId, accountId });
+
+      // Fire-and-forget: startAccount blocks until abort for long-running gateways
+      gateway.startAccount(ctx).then(() => {
+        handle.connected = true;
+        this.updateStatus(accountId, "connected", "Plugin gateway started");
+        log.info("Account started via plugin gateway", { channelId: this.channelId, accountId });
+      }).catch((err: any) => {
+        if (abortController.signal.aborted) {
+          // Normal shutdown — don't treat as error
+          this.updateStatus(accountId, "disconnected", "Stopped");
+        } else {
+          this.updateStatus(accountId, "error", `Start failed: ${err}`, String(err));
+          log.error("gateway.startAccount() failed", { channelId: this.channelId, accountId, error: String(err) });
+        }
+      });
+
+      // Mark as connected optimistically — the plugin's gateway has been invoked
+      // and will establish the backend connection. The status will be updated
+      // when the promise resolves or the plugin signals readiness.
       handle.connected = true;
-      this.handles.set(accountId, handle);
       this.updateStatus(accountId, "connected", "Plugin gateway started");
-      log.info("Account started via plugin gateway", { channelId: this.channelId, accountId });
-    } catch (err) {
-      this.updateStatus(accountId, "error", `Start failed: ${err}`, String(err));
-      throw err;
+    } else {
+      log.warn("Plugin has no gateway.startAccount() — cannot start backend connection", {
+        channelId: this.channelId,
+        accountId,
+      });
+      this.updateStatus(accountId, "error", "No gateway.startAccount()");
     }
   }
 

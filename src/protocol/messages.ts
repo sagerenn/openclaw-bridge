@@ -38,11 +38,13 @@ export enum BridgeMessageType {
   SEND_TYPING = "send_typing",
   SUBSCRIBE = "subscribe",
   UNSUBSCRIBE = "unsubscribe",
+  LIST_CHANNELS = "list_channels",
   PING = "ping",
 
   // Server -> Client
   INBOUND_MESSAGE = "inbound_message",
   CHANNEL_STATUS = "channel_status",
+  CHANNELS_LIST = "channels_list",
   SEND_ACK = "send_ack",
   SEND_ERROR = "send_error",
   PONG = "pong",
@@ -88,6 +90,11 @@ export interface SubscribePayload {
   filter?: { fromUserIds?: string[] };
 }
 
+export interface ListChannelsPayload {
+  /** If true, include detailed status per account */
+  verbose?: boolean;
+}
+
 // ─── Server -> Client Payloads ───────────────────────────────────────────────
 
 export interface InboundMessagePayload {
@@ -125,6 +132,23 @@ export interface ChannelStatusPayload {
   detail?: string;
   /** Last error (if status is "error") */
   error?: string;
+}
+
+export interface ChannelsListPayload {
+  /** Map of channel ID -> channel info */
+  channels: Record<string, {
+    /** Adapter label / display name */
+    label: string;
+    /** Accounts for this channel */
+    accounts: Record<string, {
+      /** "connected" | "disconnected" | "reconnecting" | "error" */
+      status: string;
+      /** Human-readable detail */
+      detail?: string;
+      /** Last error (if status is "error") */
+      error?: string;
+    }>;
+  }>;
 }
 
 export interface SendAckPayload {

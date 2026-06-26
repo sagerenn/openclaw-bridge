@@ -19,6 +19,7 @@ import {
   type SubscribePayload,
   type InboundMessagePayload,
   type ChannelStatusPayload,
+  type ChannelsListPayload,
   type SendAckPayload,
   type SendErrorPayload,
   type WelcomePayload,
@@ -171,6 +172,9 @@ export class BridgeServer {
       case BridgeMessageType.UNSUBSCRIBE:
         this.handleUnsubscribe(client, envelope);
         break;
+      case BridgeMessageType.LIST_CHANNELS:
+        this.handleListChannels(client, envelope);
+        break;
       case BridgeMessageType.PING:
         client.send(makeEnvelope(BridgeMessageType.PONG, "*", {}, { id: envelope.id }));
         break;
@@ -286,6 +290,48 @@ export class BridgeServer {
 
     client.removeSubscription(key);
     log.info("Client unsubscribed", { clientId: client.id, channel, accountId });
+  }
+
+  /** Handle LIST_CHANNELS from a client — returns all channels, accounts, and their status */
+  private handleListChannels(client: ClientConnection, envelope: BridgeEnvelope): void {
+    const channels: ChannelsListPayload["channels"] = {};
+
+    for (const adapter of this.channelManager.getAllAdapters()) {
+      const accounts = adapter.listAccounts();
+      const accountStatuses: ChannelsListPayload["channels"][string]["accounts"] = {};
+
+      for (const accId of accounts) {
+        const status = this.channelManager.getStatus(adapter.channelId, accId);
+        accountStatuses[accId] = {
+          status: status.state,
+          detail: status.detail,
+          error: status.lastError,
+        };
+      }
+
+      // Also include accounts from config that haven't been started yet
+      const channelConfig = (this.config as any).channels?.[adapter.channelId];
+      if (channelConfig?.accounts) {
+        for (const accId of Object.keys(channelConfig.accounts)) {
+          if (!accountStatuses[accId]) {
+            const status = this.channelManager.getStatus(adapter.channelId, accId);
+            accountStatuses[accId] = {
+              status: status.state,
+              detail: status.detail,
+              error: status.lastError,
+            };
+          }
+        }
+      }
+
+      channels[adapter.channelId] = {
+        label: adapter.label,
+        accounts: accountStatuses,
+      };
+    }
+
+    const payload: ChannelsListPayload = { channels };
+    client.send(makeEnvelope(BridgeMessageType.CHANNELS_LIST, "*", payload, { id: envelope.id }));
   }
 
   /** Route an inbound message from a channel to subscribed clients */

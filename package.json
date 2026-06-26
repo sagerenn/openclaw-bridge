@@ -11,6 +11,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "dev": "tsc --watch",
+    "test:e2e": "node dist/test/e2e-test.js",
     "install:liangzimixin": "npm install liangzimixin",
     "install:weixin": "npm install @tencent-weixin/openclaw-weixin"
   },
