@@ -372,11 +372,22 @@ export function buildGatewayContext(
   const channelRuntime = buildChannelShim(channelId, accountId, onDeliver);
 
   return {
-    // The full openclaw config — in bridge mode, we construct a minimal one
+    // The full openclaw config — in bridge mode, we construct a minimal one.
+    //
+    // The account config is exposed in TWO places so different plugins can
+    // resolve it regardless of their account-resolution strategy:
+    //   1. At the channel top level (merged) — some plugins (e.g.
+    //      @larksuite/openclaw-lark) read credentials from the base channel
+    //      section for the DEFAULT account and skip the `accounts.<id>`
+    //      override when the id is "default". Without the top-level copy,
+    //      `getLarkAccount(cfg, "default")` returns `configured: false`.
+    //   2. Under `accounts.<accountId>` — the standard override location
+    //      used by plugins that resolve non-default accounts explicitly.
     cfg: {
       channel: channelId,
       channels: {
         [channelId]: {
+          ...accountConfig,
           accounts: {
             [accountId]: accountConfig,
           },

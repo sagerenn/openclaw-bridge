@@ -239,6 +239,9 @@ npm run dev
 
 # Run E2E test (requires config.json with valid credentials)
 npm run test:e2e
+
+# Feishu/Lark E2E test (requires a `feishu` section in config.json)
+FEISHU_TARGET_ID=<open_id_or_chat_id> npm run test:e2e:feishu
 ```
 
 ## Project Structure
@@ -265,7 +268,8 @@ src/
 ├── util/
 │   └── logger.ts                  # Structured logger
 └── test/
-    └── e2e-test.ts                # End-to-end test
+    ├── e2e-test.ts                # End-to-end test (generic, any channel)
+    └── e2e-test-feishu.ts         # End-to-end test for the Feishu/Lark channel
 ```
 
 ## HTTP API
