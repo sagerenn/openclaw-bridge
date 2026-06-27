@@ -1,0 +1,233 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ─── Test ──────────────────────────────────────────────────────────────────
+  # Runs the credential-free spec E2E test (empty channels, fixed port). The
+  # channel-specific E2E suites (feishu / qqbot / weixin / liangzimixin) require
+  # live channel credentials and real inbound traffic, so they are not automated
+  # here — run them locally against a populated config.json.
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      # `npm ci` runs the postinstall hook, which builds dist/ and patches the
+      # lark plugin — so dist/ is ready for the test step.
+      - name: Install
+        run: npm ci
+
+      - name: Type-check
+        run: npm run build
+
+      - name: Run spec E2E test
+        run: npm run test:e2e:spec
+
+  # ─── Docker (multi-arch) ────────────────────────────────────────────────────
+  # Builds linux/amd64 + linux/arm64 images and publishes them. Pushes on:
+  #   - main  -> :latest + :sha + :branch
+  #   - v* tag -> :semver (major.minor.patch, major.minor, major) + :latest
+  # Pull requests build (no push) to validate the Dockerfile per arch.
+  docker:
+    name: Docker (${{ matrix.platform }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Native runners per arch — no QEMU, fast and reliable.
+        platform: [amd64, arm64]
+        include:
+          - platform: amd64
+            os: ubuntu-latest
+          - platform: arm64
+            os: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub (optional)
+        if: github.event_name != 'pull_request' && vars.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build & push (single arch, by digest)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.platform }}
+          provenance: false
+          # Push by digest only (no tag) so per-arch pushes can't clobber each
+          # other; the `manifest` job assembles the digests into one multi-arch
+          # manifest list and rewrites the final tag set onto it.
+          outputs: |
+            ${{ github.event_name != 'pull_request' && format('type=image,name={0}/{1},push=true,push-by-digest=true', env.REGISTRY, env.IMAGE_NAME) || 'type=docker,dest=/tmp/image.tar' }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+
+      - name: Upload image artifact (PR only)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.platform }}
+          path: /tmp/image.tar
+          retention-days: 7
+
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        id: digest
+        run: |
+          digest="${{ steps.build.outputs.digest }}"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.platform }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ─── Merge manifests into a single multi-arch image ─────────────────────────
+  manifest:
+    name: Manifest (multi-arch)
+    needs: docker
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Assemble the per-arch digests (pushed by `push-by-digest` above) into one
+      # multi-arch manifest list, then rewrite it onto every final tag from
+      # metadata-action (:latest, :v1.2.3, :1.2, :1, :sha, :branch).
+      - name: Create multi-arch manifest list
+        id: manifest
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          repo="${REGISTRY}/${IMAGE_NAME}"
+          # Collect per-arch image refs by digest.
+          mapfile -t digests < <(find /tmp/digests -type f -printf '%f\n' | sed 's/^/sha256:/')
+          src_args=()
+          for d in "${digests[@]}"; do src_args+=("$repo@$d"); done
+          # Map every final tag to a repo:tag target for imagetools.
+          mapfile -t tags <<< "$TAGS"
+          tgt_args=()
+          for t in "${tags[@]}"; do
+            [ -n "$t" ] && tgt_args+=("-t" "$t")
+          done
+          echo "Merging: ${src_args[*]}"
+          echo "Target tags: ${TAGS//$'\n'/, }"
+          docker buildx imagetools create "${tgt_args[@]}" "${src_args[@]}"
+          digest="$(docker buildx imagetools inspect "${tgt_args[1]}" --format '{{json .Manifest.Digest}}' | tr -d '\"')"
+          echo "manifest-digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Verify multi-arch manifest
+        run: |
+          repo="${REGISTRY}/${IMAGE_NAME}"
+          echo "### :whale: Multi-arch image published" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && echo "- \`${tag}\`" >> "$GITHUB_STEP_SUMMARY"
+            [ -n "$tag" ] && echo "  platforms:" >> "$GITHUB_STEP_SUMMARY"
+            [ -n "$tag" ] && docker buildx imagetools inspect "$tag" --format '{{range .Manifest.Manifests}}  - {{.Platform.OS}}/{{.Platform.Architecture}}{{"\n"}}{{end}}' >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          done <<< "${{ steps.meta.outputs.tags }}"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Manifest digest: \`${{ steps.manifest.outputs.manifest-digest }}\`" >> "$GITHUB_STEP_SUMMARY"

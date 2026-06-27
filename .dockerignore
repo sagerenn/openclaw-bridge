@@ -1,0 +1,30 @@
+# Version control
+.git
+.gitignore
+.github
+
+# Build output (rebuilt inside the image)
+dist
+*.tsbuildinfo
+
+# Node
+node_modules
+
+# Editor / OS
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# Test artifacts & logs
+*.log
+logs
+npm-debug.log*
+
+# Docs
+docs
+LICENSE
+README.md
+
+# Local config — never bake credentials into the image
+config.json

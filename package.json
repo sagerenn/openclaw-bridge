@@ -17,10 +17,10 @@
     "test:e2e:qqbot": "node dist/test/e2e-test-qqbot.js",
     "test:e2e:weixin": "node dist/test/e2e-test-weixin.js",
     "patch:lark": "node dist/util/patch-lark-plugin.js",
-    "postinstall": "node dist/util/patch-lark-plugin.js || true",
+    "postinstall": "npm run build && node dist/util/patch-lark-plugin.js || true",
     "install:liangzimixin": "npm install liangzimixin",
     "install:weixin": "npm install @tencent-weixin/openclaw-weixin",
-    "install:lark": "npm install @larksuite/openclaw-lark && node dist/util/patch-lark-plugin.js"
+    "install:lark": "npm install @larksuite/openclaw-lark && npm run build && node dist/util/patch-lark-plugin.js"
   },
   "dependencies": {
     "@larksuite/openclaw-lark": "^2026.6.10",
