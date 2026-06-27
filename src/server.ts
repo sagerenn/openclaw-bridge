@@ -25,8 +25,9 @@ import { BridgeServer } from "./server/bridge-server.js";
 import { ClientRegistry } from "./server/client-registry.js";
 import { ChannelManager } from "./channels/channel-manager.js";
 import { loadChannelAdapters } from "./channels/plugin-loader.js";
-import { loadConfig, type BridgeConfig } from "./config/schema.js";
+import { loadConfig, normalizeProxyUrl, resolveEffectiveProxy, type BridgeConfig } from "./config/schema.js";
 import { ContactStore } from "./contacts/contact-store.js";
+import { setupProxy, resolveProxyFromEnv, getActiveProxyUrl } from "./util/proxy-setup.js";
 import { rootLogger } from "./util/logger.js";
 
 const log = rootLogger.child("main");
@@ -58,6 +59,15 @@ async function main(): Promise<void> {
 
   log.info("Starting OpenClaw Bridge Server", { version: "1.0.0" });
 
+  // Activate the global outbound proxy BEFORE any channel adapter starts, so
+  // every plugin's fetch() and WebSocket traffic is routed through it. The
+  // explicit `proxy` config wins; otherwise we honor the standard env vars
+  // (HTTPS_PROXY / HTTP_PROXY / ALL_PROXY) so a shell proxy just works.
+  const globalProxy = normalizeProxyUrl(config.proxy) ?? resolveProxyFromEnv();
+  if (globalProxy) {
+    setupProxy(globalProxy);
+  }
+
   // Create core components
   const channelManager = new ChannelManager();
   const clientRegistry = new ClientRegistry();
@@ -82,6 +92,13 @@ async function main(): Promise<void> {
       ...accountConfig,
       ...(channelConfig?.transport ?? {}),
     };
+
+    // Apply any channel/account-level proxy override before starting.
+    const accountProxy = resolveEffectiveProxy(config, channelId, accountId);
+    if (accountProxy && accountProxy !== getActiveProxyUrl()) {
+      setupProxy(accountProxy);
+    }
+
     try {
       await channelManager.startAccount(channelId, accountId, mergedConfig);
       log.info("Auto-started account after QR login", { channelId, accountId });
@@ -158,6 +175,24 @@ async function startConfiguredChannels(
     }
 
     for (const [accountId, accountConfig] of Object.entries(accounts)) {
+      // A channel/account-level proxy override takes precedence over the
+      // global one for this account's traffic. Because undici's fetch
+      // dispatcher is process-wide, the active proxy is necessarily shared
+      // across accounts; if multiple accounts configure different proxies,
+      // the last-started one wins — log that so it isn't a silent surprise.
+      const accountProxy = resolveEffectiveProxy(config, channelId, accountId);
+      if (accountProxy && accountProxy !== getActiveProxyUrl()) {
+        if (getActiveProxyUrl()) {
+          log.warn("Conflicting per-account proxies — fetch traffic will use the last-started account's proxy (global fetch dispatcher is shared)", {
+            channelId,
+            accountId,
+            previous: getActiveProxyUrl(),
+            current: accountProxy,
+          });
+        }
+        setupProxy(accountProxy);
+      }
+
       try {
         // Merge channel-level transport overrides into account config
         const mergedConfig = {

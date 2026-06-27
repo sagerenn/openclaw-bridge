@@ -54,6 +54,84 @@ export enum BridgeMessageType {
   QR_RESULT = "qr_result",
 }
 
+/**
+ * Message-direction discriminator for the spec generator. Keep this adjacent
+ * to the enum; when a message type is added to `BridgeMessageType`, add its
+ * direction here and the AsyncAPI spec updates automatically (no separate
+ * spec edit needed).
+ */
+export type MessageDirection = "client-to-server" | "server-to-client";
+
+export const BRIDGE_MESSAGE_DIRECTIONS: Record<BridgeMessageType, MessageDirection> = {
+  [BridgeMessageType.SEND_TEXT]: "client-to-server",
+  [BridgeMessageType.SEND_MEDIA]: "client-to-server",
+  [BridgeMessageType.SEND_TYPING]: "client-to-server",
+  [BridgeMessageType.SUBSCRIBE]: "client-to-server",
+  [BridgeMessageType.UNSUBSCRIBE]: "client-to-server",
+  [BridgeMessageType.LIST_CHANNELS]: "client-to-server",
+  [BridgeMessageType.PING]: "client-to-server",
+  [BridgeMessageType.QR_START]: "client-to-server",
+  [BridgeMessageType.QR_WAIT]: "client-to-server",
+
+  [BridgeMessageType.INBOUND_MESSAGE]: "server-to-client",
+  [BridgeMessageType.CHANNEL_STATUS]: "server-to-client",
+  [BridgeMessageType.CHANNELS_LIST]: "server-to-client",
+  [BridgeMessageType.SEND_ACK]: "server-to-client",
+  [BridgeMessageType.SEND_ERROR]: "server-to-client",
+  [BridgeMessageType.PONG]: "server-to-client",
+  [BridgeMessageType.WELCOME]: "server-to-client",
+  [BridgeMessageType.QR_RESULT]: "server-to-client",
+};
+
+/**
+ * Human-readable title for each message type, used by the spec generator.
+ * Single source of truth: updating this map updates the AsyncAPI spec.
+ */
+export const BRIDGE_MESSAGE_TITLES: Record<BridgeMessageType, string> = {
+  [BridgeMessageType.SEND_TEXT]: "Send text",
+  [BridgeMessageType.SEND_MEDIA]: "Send media",
+  [BridgeMessageType.SEND_TYPING]: "Send typing indicator",
+  [BridgeMessageType.SUBSCRIBE]: "Subscribe",
+  [BridgeMessageType.UNSUBSCRIBE]: "Unsubscribe",
+  [BridgeMessageType.LIST_CHANNELS]: "List channels",
+  [BridgeMessageType.PING]: "Ping",
+  [BridgeMessageType.QR_START]: "Start QR login",
+  [BridgeMessageType.QR_WAIT]: "Wait for QR login",
+  [BridgeMessageType.INBOUND_MESSAGE]: "Inbound message",
+  [BridgeMessageType.CHANNEL_STATUS]: "Channel status",
+  [BridgeMessageType.CHANNELS_LIST]: "Channels list",
+  [BridgeMessageType.SEND_ACK]: "Send ack",
+  [BridgeMessageType.SEND_ERROR]: "Send error",
+  [BridgeMessageType.PONG]: "Pong",
+  [BridgeMessageType.WELCOME]: "Welcome",
+  [BridgeMessageType.QR_RESULT]: "QR result",
+};
+
+/**
+ * Maps each message type to its payload schema name (a key of PAYLOAD_SCHEMAS
+ * in the spec generator), or undefined for empty payloads. Single source of
+ * truth: updating this map updates the AsyncAPI spec.
+ */
+export const BRIDGE_MESSAGE_PAYLOAD_SCHEMAS: Partial<Record<BridgeMessageType, string>> = {
+  [BridgeMessageType.SEND_TEXT]: "SendTextPayload",
+  [BridgeMessageType.SEND_MEDIA]: "SendMediaPayload",
+  [BridgeMessageType.SEND_TYPING]: "SendTypingPayload",
+  [BridgeMessageType.SUBSCRIBE]: "SubscribePayload",
+  [BridgeMessageType.UNSUBSCRIBE]: "SubscribePayload",
+  [BridgeMessageType.LIST_CHANNELS]: "ListChannelsPayload",
+  [BridgeMessageType.QR_START]: "QrStartPayload",
+  [BridgeMessageType.QR_WAIT]: "QrWaitPayload",
+  [BridgeMessageType.INBOUND_MESSAGE]: "InboundMessagePayload",
+  [BridgeMessageType.CHANNEL_STATUS]: "ChannelStatusPayload",
+  [BridgeMessageType.CHANNELS_LIST]: "ChannelsListPayload",
+  [BridgeMessageType.SEND_ACK]: "SendAckPayload",
+  [BridgeMessageType.SEND_ERROR]: "SendErrorPayload",
+  [BridgeMessageType.WELCOME]: "WelcomePayload",
+  [BridgeMessageType.QR_RESULT]: "QrResultPayload",
+  // PING / PONG carry empty payloads
+};
+
+
 // ─── Client -> Server Payloads ───────────────────────────────────────────────
 
 export interface SendTextPayload {
@@ -201,6 +279,10 @@ export interface WelcomePayload {
   version: string;
   /** Available channels and their current status */
   channels: Record<string, { status: string; accounts: string[] }>;
+  /** URL to the AsyncAPI spec for the WebSocket API, if available */
+  asyncApiSpecUrl?: string;
+  /** URL to the OpenAPI spec for the HTTP API, if available */
+  openApiSpecUrl?: string;
 }
 
 // ─── Normalized Inbound Message (internal) ───────────────────────────────────

@@ -12,6 +12,7 @@
     "start": "node dist/server.js",
     "dev": "tsc --watch",
     "test:e2e": "node dist/test/e2e-test.js",
+    "test:e2e:spec": "node dist/test/e2e-test-spec.js",
     "test:e2e:feishu": "node dist/test/e2e-test-feishu.js",
     "test:e2e:qqbot": "node dist/test/e2e-test-qqbot.js",
     "test:e2e:weixin": "node dist/test/e2e-test-weixin.js",

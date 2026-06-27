@@ -135,6 +135,9 @@ ws.on("open", () => {
 | `server.maxClients` | number | `100` | Maximum concurrent WS clients |
 | `server.clientHeartbeatMs` | number | `30000` | Heartbeat ping interval (ms) |
 | `server.maxMessageSize` | number | `10485760` | Max WS message size (10 MB) |
+| `server.asyncApiSpecUrl` | string | `"/spec/asyncapi.json"` | URL advertised for the live AsyncAPI spec (WebSocket API) |
+| `server.openApiSpecUrl` | string | `"/spec/openapi.json"` | URL advertised for the live OpenAPI spec (HTTP API) |
+| `proxy` | string \| object | — | Global outbound proxy for all channel-plugin traffic (see [Proxy support](#proxy-support)) |
 | `channels` | object | `{}` | Channel configurations (see below) |
 | `logging.level` | string | `"info"` | Log level: `debug`, `info`, `warn`, `error` |
 | `logging.dir` | string | — | Log output directory (not yet implemented) |
@@ -151,11 +154,13 @@ Each channel is keyed by its channel ID (matching the plugin's `openclaw.plugin.
       "accounts": {
         "<account-id>": {
           // Plugin-specific credentials — passed through to the plugin
+          "proxy": "socks5://user:pass@host:1080"  // optional account-level override
         }
       },
       "transport": {
         // Optional transport-level overrides merged into each account config
-      }
+      },
+      "proxy": "http://proxy:8080"  // optional channel-level proxy override
     }
   }
 }
@@ -248,6 +253,10 @@ QQBOT_TARGET_ID=qqbot:c2c:<user_openid> npm run test:e2e:qqbot
 
 # WeChat E2E test (requires an `openclaw-weixin` section; logs in via QR scan)
 WEIXIN_SENDER_ID=<user_id>@im.wechat npm run test:e2e:weixin
+
+# Spec URL E2E test (no channel credentials needed — verifies the live
+# AsyncAPI/OpenAPI docs and the welcome-envelope spec URLs)
+BRIDGE_CONFIG_PATH=./config.json npm run test:e2e:spec
 ```
 
 ## Project Structure
@@ -268,21 +277,29 @@ src/
 ├── contacts/
 │   └── contact-store.ts           # Contact persistence — records user IDs, sends online notifications
 ├── server/
-│   ├── bridge-server.ts           # Core WS+HTTP server — message routing, client management, QR API
+│   ├── bridge-server.ts           # Core WS+HTTP server — message routing, client management, QR + spec API
 │   ├── client-connection.ts       # Single WS client with subscriptions and filters
-│   └── client-registry.ts         # Client tracking and broadcast routing
+│   ├── client-registry.ts         # Client tracking and broadcast routing
+│   ├── http-routes.ts             # Single source of truth for HTTP routes (shared with the OpenAPI spec)
+│   └── spec-generator.ts          # Live AsyncAPI/OpenAPI spec generators (derived from the protocol)
 ├── util/
-│   └── logger.ts                  # Structured logger
+│   ├── logger.ts                  # Structured logger
+│   └── proxy-setup.ts             # HTTP/SOCKS5 proxy for plugin fetch + WebSocket traffic
 └── test/
     ├── e2e-test.ts                # End-to-end test (generic, any channel)
     ├── e2e-test-feishu.ts         # End-to-end test for the Feishu/Lark channel
     ├── e2e-test-qqbot.ts          # End-to-end test for the QQ Bot channel
-    └── e2e-test-weixin.ts         # End-to-end test for the WeChat channel (QR login)
+    ├── e2e-test-weixin.ts         # End-to-end test for the WeChat channel (QR login)
+    └── e2e-test-spec.ts           # E2E test for the live AsyncAPI/OpenAPI spec URLs
 ```
 
 ## HTTP API
 
 The bridge exposes HTTP endpoints for plugin operations alongside the WebSocket server.
+
+> **Specs are generated live.** The WebSocket API is documented as an AsyncAPI spec and the HTTP API as an OpenAPI spec, both generated **on every request** from the bridge's own protocol definitions (the message-type enum and the route table). Adding or changing an API updates the spec automatically — there's nothing to update twice. See [API Specifications](#api-specifications).
+
+
 
 ### QR Code Login
 
@@ -310,32 +327,15 @@ Response:
 }
 ```
 
+#### `GET /spec/asyncapi.json`
+
+Returns the AsyncAPI 2.6.0 specification describing the WebSocket API. Generated live from the bridge's message-type enum, so it always reflects the current protocol.
+
+#### `GET /spec/openapi.json`
+
+Returns the OpenAPI 3.1.0 specification describing the HTTP API. Generated live from the bridge's route table, so it always reflects the current endpoints.
+
 #### `GET /plugin/:channelId/:accountId/qr/status`
-
-Polls the QR login status. This is a long-poll endpoint — it blocks until the login completes or times out.
-
-Query params:
-- `sessionKey=xxx` — Session key from the `/qr` or `/qr/json` response (required)
-- `timeoutMs=120000` — Maximum wait time in milliseconds (default: 120000)
-
-Response (waiting):
-```json
-{
-  "connected": false,
-  "message": "Waiting for scan..."
-}
-```
-
-Response (success):
-```json
-{
-  "connected": true,
-  "message": "Login successful",
-  "accountId": "bot-123456"
-}
-```
-
-After a successful QR login, the bridge automatically starts the account.
 
 ### Example: WeChat QR Login
 
@@ -349,6 +349,55 @@ open http://localhost:9300/plugin/openclaw-weixin/default/qr
 # 3. Poll for status (use sessionKey from step 1)
 curl "http://localhost:9300/plugin/openclaw-weixin/default/qr/status?sessionKey=abc-123"
 ```
+
+## Proxy Support
+
+The bridge can route **all** outbound channel-plugin traffic — both HTTP `fetch()` calls (REST APIs, token refresh, media fetches, long-polls) and WebSocket/gateway connections — through an HTTP or SOCKS5 proxy. This is done generically, with no plugin-specific code: the proxy is installed at the two network chokepoints every plugin shares (undici's global fetch dispatcher, and the `ws` package's socket creation).
+
+### Configuring a proxy
+
+Set a global proxy at the top level, or override it per channel / per account:
+
+```json
+{
+  "proxy": "socks5://user:pass@proxy.example.com:1080",
+  "channels": {
+    "openclaw-weixin": {
+      "proxy": "http://corporate-proxy:8080",
+      "accounts": {
+        "default": { "proxy": "socks5://another-proxy:1080" }
+      }
+    }
+  }
+}
+```
+
+Supported schemes:
+- `http://[user:pass@]host:port` — HTTP CONNECT tunnel
+- `https://[user:pass@]host:port` — HTTPS proxy
+- `socks5://[user:pass@]host:port` (alias `socks://`) — SOCKS5 with optional username/password auth
+
+Precedence: **account > channel > global**. If no explicit proxy is configured anywhere, the bridge honors the standard environment variables `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` (case-insensitive), so a shell proxy just works.
+
+### How it works
+
+- **HTTP fetch traffic** — an undici global dispatcher (`ProxyAgent` for http(s) proxies, `Socks5ProxyAgent` for socks5) is installed before any channel starts. undici is the engine behind Node's global `fetch()`, so every plugin's `fetch()` is transparently proxied.
+- **WebSocket traffic** — every installed copy of the `ws` package is patched (idempotently, on startup) so `new WebSocket()` tunnels its connection through the proxy via a SOCKS5 or HTTP-CONNECT handshake. The patch is inert when no proxy is active, so connections behave normally otherwise.
+
+### Limitations
+
+undici's fetch dispatcher is **process-wide**, so the active proxy is shared across all accounts. If multiple accounts configure different proxies, the last-started account's proxy wins for fetch traffic (logged as a warning); per-account proxying is fully honored for WebSocket connections opened after the switch.
+
+## API Specifications
+
+The bridge serves machine-readable API specs, generated live on every request from the bridge's own code — so they never drift from the actual API:
+
+| Endpoint | Spec | Describes |
+|----------|------|-----------|
+| `GET /spec/asyncapi.json` | [AsyncAPI 2.6.0](https://www.asyncapi.com/) | The WebSocket protocol (all message types and payloads) |
+| `GET /spec/openapi.json` | [OpenAPI 3.1.0](https://www.openapis.org/) | The HTTP API (all routes) |
+
+The WebSocket spec is derived from the `BridgeMessageType` enum and its descriptor maps in `src/protocol/messages.ts`; the HTTP spec is derived from the route table in `src/server/http-routes.ts`. **Adding a new message type or HTTP route is the only change needed** — it automatically appears in the served spec. The specs are also advertised in the `welcome` envelope (`asyncApiSpecUrl` / `openApiSpecUrl`), whose URLs can be overridden via `server.asyncApiSpecUrl` / `server.openApiSpecUrl`.
 
 ## Contact Persistence & Online Notifications
 

@@ -30,8 +30,22 @@ import {
   type QrResultPayload,
 } from "../protocol/messages.js";
 import { rootLogger } from "../util/logger.js";
+import { matchHttpRoute } from "./http-routes.js";
+import { generateAsyncApi, generateOpenApi } from "./spec-generator.js";
 
 const log = rootLogger.child("server");
+
+// ─── API spec definitions ────────────────────────────────────────────────────
+// Machine-readable specs for the WebSocket API (AsyncAPI) and HTTP API (OpenAPI),
+// generated on demand from the protocol definitions and served from /spec/* so
+// clients can discover the protocol programmatically.
+const ASYNC_API_PATH = "/spec/asyncapi.json";
+const OPEN_API_PATH = "/spec/openapi.json";
+
+/** Resolve the advertised URL for a spec, honoring any explicit config override. */
+function resolveSpecUrl(override: string | undefined, defaultPath: string): string | undefined {
+  return override ?? defaultPath;
+}
 
 export class BridgeServer {
   private httpServer: Server;
@@ -404,44 +418,94 @@ export class BridgeServer {
   // ─── HTTP API ────────────────────────────────────────────────────────────────
 
   /**
-   * Handle HTTP API requests for plugin operations.
-   *
-   * Routes:
-   *   GET /plugin/:channelId/:accountId/qr         — Start QR login, return QR image
-   *   GET /plugin/:channelId/:accountId/qr/status   — Poll QR login status
-   *   GET /plugin/:channelId/:accountId/qr/json     — Start QR login, return JSON
+   * Handle HTTP API requests. Routes are defined in `http-routes.ts` (the
+   * single source of truth shared with the OpenAPI spec generator), so adding
+   * a route there automatically makes it live AND documented at
+   * /spec/openapi.json — no separate spec update needed.
    */
   private handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-    const path = url.pathname;
+    const pathname = url.pathname;
 
-    // Only handle /plugin/ routes — everything else is 404 (WS handles the rest)
-    if (!path.startsWith("/plugin/")) {
+    const matched = matchHttpRoute(req.method ?? "GET", pathname);
+    if (!matched) {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Not found" }));
       return;
     }
 
-    const parts = path.split("/").filter(Boolean); // ["plugin", channelId, accountId, ...rest]
-    if (parts.length < 3) {
-      res.writeHead(400, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Path format: /plugin/:channelId/:accountId/qr" }));
-      return;
-    }
+    const { route, pathParams } = matched;
+    const channelId = pathParams.channelId;
+    const accountId = pathParams.accountId;
 
-    const [, channelId, accountId, ...rest] = parts;
-    const subPath = "/" + rest.join("/");
-
-    if (subPath === "/qr") {
-      this.handleQrHttpRequest(channelId, accountId, url, req, res);
-    } else if (subPath === "/qr/status") {
-      this.handleQrStatusHttpRequest(channelId, accountId, url, req, res);
-    } else if (subPath === "/qr/json") {
-      this.handleQrJsonHttpRequest(channelId, accountId, url, req, res);
-    } else {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: `Unknown plugin route: ${subPath}` }));
+    switch (route.handler) {
+      case "qr-html":
+        this.handleQrHttpRequest(channelId, accountId, url, req, res);
+        break;
+      case "qr-json":
+        this.handleQrJsonHttpRequest(channelId, accountId, url, req, res);
+        break;
+      case "qr-status":
+        this.handleQrStatusHttpRequest(channelId, accountId, url, req, res);
+        break;
+      case "spec-asyncapi":
+        this.serveAsyncApiSpec(res);
+        break;
+      case "spec-openapi":
+        this.serveOpenApiSpec(res);
+        break;
+      default:
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: `Unhandled route: ${route.path}` }));
     }
+  }
+
+  /**
+   * GET /spec/asyncapi.json — the WebSocket API spec, generated live from the
+   * protocol message enum so it always reflects the current API.
+   */
+  private serveAsyncApiSpec(res: ServerResponse): void {
+    try {
+      const spec = generateAsyncApi(this.config, {
+        asyncApiSpecUrl: this.resolveAsyncApiSpecUrl(),
+        openApiSpecUrl: this.resolveOpenApiSpecUrl(),
+      });
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify(spec, null, 2));
+    } catch (err) {
+      log.error("Failed to generate AsyncAPI spec", { error: String(err) });
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: String(err) }));
+    }
+  }
+
+  /**
+   * GET /spec/openapi.json — the HTTP API spec, generated live from the route
+   * table so it always reflects the current API.
+   */
+  private serveOpenApiSpec(res: ServerResponse): void {
+    try {
+      const spec = generateOpenApi(this.config, {
+        asyncApiSpecUrl: this.resolveAsyncApiSpecUrl(),
+        openApiSpecUrl: this.resolveOpenApiSpecUrl(),
+      });
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify(spec, null, 2));
+    } catch (err) {
+      log.error("Failed to generate OpenAPI spec", { error: String(err) });
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: String(err) }));
+    }
+  }
+
+  /** Effective AsyncAPI spec URL (config override or the served default). */
+  private resolveAsyncApiSpecUrl(): string | undefined {
+    return resolveSpecUrl(this.config.server.asyncApiSpecUrl, ASYNC_API_PATH);
+  }
+
+  /** Effective OpenAPI spec URL (config override or the served default). */
+  private resolveOpenApiSpecUrl(): string | undefined {
+    return resolveSpecUrl(this.config.server.openApiSpecUrl, OPEN_API_PATH);
   }
 
   /**
@@ -606,7 +670,12 @@ export class BridgeServer {
         accounts,
       };
     }
-    return { version: "1.0.0", channels };
+    return {
+      version: "1.0.0",
+      channels,
+      asyncApiSpecUrl: this.resolveAsyncApiSpecUrl(),
+      openApiSpecUrl: this.resolveOpenApiSpecUrl(),
+    };
   }
 
   /** Send an error envelope to a client */

@@ -5,8 +5,13 @@
     "path": "/bridge",
     "maxClients": 50,
     "clientHeartbeatMs": 30000,
-    "maxMessageSize": 10485760
+    "maxMessageSize": 10485760,
+    "_comment_spec": "Optional: override the URLs advertised for the live AsyncAPI/OpenAPI specs. Defaults are /spec/asyncapi.json and /spec/openapi.json (served by the bridge).",
+    "asyncApiSpecUrl": "/spec/asyncapi.json",
+    "openApiSpecUrl": "/spec/openapi.json"
   },
+  "_comment_proxy": "Global proxy for ALL outbound channel-plugin traffic (fetch + WebSocket). Schemes: http://, https://, socks5:// (alias socks://). Omit to honor HTTPS_PROXY/HTTP_PROXY/ALL_PROXY env vars.",
+  "proxy": "socks5://user:pass@proxy.example.com:1080",
   "channels": {
     "liangzimixin": {
       "enabled": true,
@@ -19,7 +24,8 @@
           "env": "production",
           "encryptionMode": "quantum_and_plain"
         }
-      }
+      },
+      "_comment_proxy": "Channel/account-level proxy overrides take precedence over the global proxy. Put a 'proxy' string here or inside an account to route just this channel."
     },
     "openclaw-weixin": {
       "enabled": true,
