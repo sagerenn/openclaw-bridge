@@ -242,6 +242,12 @@ npm run test:e2e
 
 # Feishu/Lark E2E test (requires a `feishu` section in config.json)
 FEISHU_TARGET_ID=<open_id_or_chat_id> npm run test:e2e:feishu
+
+# QQ Bot E2E test (requires a `qqbot` section in config.json)
+QQBOT_TARGET_ID=qqbot:c2c:<user_openid> npm run test:e2e:qqbot
+
+# WeChat E2E test (requires an `openclaw-weixin` section; logs in via QR scan)
+WEIXIN_SENDER_ID=<user_id>@im.wechat npm run test:e2e:weixin
 ```
 
 ## Project Structure
@@ -269,7 +275,9 @@ src/
 │   └── logger.ts                  # Structured logger
 └── test/
     ├── e2e-test.ts                # End-to-end test (generic, any channel)
-    └── e2e-test-feishu.ts         # End-to-end test for the Feishu/Lark channel
+    ├── e2e-test-feishu.ts         # End-to-end test for the Feishu/Lark channel
+    ├── e2e-test-qqbot.ts          # End-to-end test for the QQ Bot channel
+    └── e2e-test-weixin.ts         # End-to-end test for the WeChat channel (QR login)
 ```
 
 ## HTTP API

@@ -73,6 +73,14 @@ export interface ChannelAdapter {
   listAccounts(): string[];
 
   /**
+   * List account IDs the plugin itself knows about — e.g. accounts whose
+   * credentials were persisted by a QR-login flow (openclaw-weixin stores
+   * these in its own state dir, not in the bridge config). Used to auto-resume
+   * such accounts on boot. Returns [] when the plugin exposes no discovery.
+   */
+  listSavedAccountIds(): string[];
+
+  /**
    * Start a QR code login flow for an account.
    * Returns a QR code image and session key for polling.
    * Only supported by plugins that implement gateway.loginWithQrStart().

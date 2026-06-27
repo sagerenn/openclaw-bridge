@@ -70,20 +70,23 @@ async function main(): Promise<void> {
   channelManager.setOnQrLoginSuccess(async (channelId, accountId) => {
     log.info("QR login succeeded — auto-starting account", { channelId, accountId });
     const channelConfig = (config as any).channels?.[channelId];
-    const accountConfig = channelConfig?.accounts?.[accountId];
-    if (accountConfig) {
-      const mergedConfig = {
-        ...accountConfig,
-        ...(channelConfig.transport ?? {}),
-      };
-      try {
-        await channelManager.startAccount(channelId, accountId, mergedConfig);
-        log.info("Auto-started account after QR login", { channelId, accountId });
-      } catch (err) {
-        log.error("Failed to auto-start account after QR login", { channelId, accountId, error: String(err) });
-      }
-    } else {
-      log.warn("No config found for QR-logged account, cannot auto-start", { channelId, accountId });
+    const accountConfig = channelConfig?.accounts?.[accountId] ?? {};
+
+    // Channels like openclaw-weixin persist credentials in the plugin's own
+    // state dir at QR-login time (NOT in the bridge config), keyed by a
+    // server-assigned account ID that the bridge cannot predict. Their
+    // adapter resolves credentials from disk via the plugin, so an empty
+    // account config is expected and fine — start the account regardless of
+    // whether it has a static config entry.
+    const mergedConfig = {
+      ...accountConfig,
+      ...(channelConfig?.transport ?? {}),
+    };
+    try {
+      await channelManager.startAccount(channelId, accountId, mergedConfig);
+      log.info("Auto-started account after QR login", { channelId, accountId });
+    } catch (err) {
+      log.error("Failed to auto-start account after QR login", { channelId, accountId, error: String(err) });
     }
   });
 
@@ -105,6 +108,12 @@ async function main(): Promise<void> {
 
   // Then start configured channel accounts (may take time for backend connections)
   await startConfiguredChannels(config, channelManager);
+
+  // Resume accounts whose credentials were persisted out-of-band by a
+  // plugin (e.g. openclaw-weixin via QR login) but have no static config
+  // entry. Without this, a logged-in WeChat account would sit idle until the
+  // user re-scans — the bridge would never start its long-poll loop.
+  await resumeSavedAccounts(config, channelManager);
 
   // Send online notification to all persisted contacts
   await sendOnlineNotifications(channelManager, contactStore);
@@ -170,6 +179,43 @@ async function startConfiguredChannels(
         } else {
           log.error("Failed to start channel account", { channelId, accountId, error: errMsg });
         }
+      }
+    }
+  }
+}
+
+/**
+ * Resume accounts the plugin itself knows about (credentials persisted by a
+ * QR-login flow, e.g. openclaw-weixin) that aren't listed in the bridge config.
+ *
+ * These accounts aren't started by startConfiguredChannels() because they
+ * have no static config entry — the bridge couldn't have predicted their
+ * server-assigned account IDs. The plugin's config.listAccountIds(cfg)
+ * enumerates them, and its gateway resolves real credentials from disk.
+ */
+async function resumeSavedAccounts(
+  config: BridgeConfig,
+  channelManager: ChannelManager
+): Promise<void> {
+  for (const adapter of channelManager.getAllAdapters()) {
+    const channelId = adapter.channelId;
+    const savedIds = adapter.listSavedAccountIds();
+
+    for (const accountId of savedIds) {
+      // Skip accounts already started (configured at boot, or already resumed)
+      if (adapter.listAccounts().includes(accountId)) continue;
+
+      const channelConfig = (config as any).channels?.[channelId];
+      if (channelConfig?.enabled === false) {
+        log.info("Channel disabled, skipping saved account", { channelId, accountId });
+        continue;
+      }
+
+      try {
+        await channelManager.startAccount(channelId, accountId, {});
+        log.info("Resumed saved account", { channelId, accountId });
+      } catch (err: any) {
+        log.warn("Failed to resume saved account", { channelId, accountId, error: String(err) });
       }
     }
   }

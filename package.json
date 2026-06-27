@@ -13,6 +13,8 @@
     "dev": "tsc --watch",
     "test:e2e": "node dist/test/e2e-test.js",
     "test:e2e:feishu": "node dist/test/e2e-test-feishu.js",
+    "test:e2e:qqbot": "node dist/test/e2e-test-qqbot.js",
+    "test:e2e:weixin": "node dist/test/e2e-test-weixin.js",
     "patch:lark": "node dist/util/patch-lark-plugin.js",
     "postinstall": "node dist/util/patch-lark-plugin.js || true",
     "install:liangzimixin": "npm install liangzimixin",
@@ -21,6 +23,7 @@
   },
   "dependencies": {
     "@larksuite/openclaw-lark": "^2026.6.10",
+    "@tencent-connect/openclaw-qqbot": "^1.7.2",
     "@tencent-weixin/openclaw-weixin": "^2.4.6",
     "@types/qrcode": "^1.5.6",
     "openclaw": "^2026.6.10",

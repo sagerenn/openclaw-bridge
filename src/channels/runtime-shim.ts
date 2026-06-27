@@ -367,11 +367,12 @@ export function buildGatewayContext(
   accountConfig: Record<string, unknown>,
   abortSignal: AbortSignal,
   onDeliver: DeliverInterceptor,
+  plugin?: Record<string, any>,
 ): Record<string, any> {
   const runtime = buildPluginRuntime(channelId, accountId, onDeliver);
   const channelRuntime = buildChannelShim(channelId, accountId, onDeliver);
 
-  return {
+  const cfg = {
     // The full openclaw config — in bridge mode, we construct a minimal one.
     //
     // The account config is exposed in TWO places so different plugins can
@@ -383,25 +384,65 @@ export function buildGatewayContext(
     //      `getLarkAccount(cfg, "default")` returns `configured: false`.
     //   2. Under `accounts.<accountId>` — the standard override location
     //      used by plugins that resolve non-default accounts explicitly.
-    cfg: {
-      channel: channelId,
-      channels: {
-        [channelId]: {
-          ...accountConfig,
-          accounts: {
-            [accountId]: accountConfig,
-          },
+    channel: channelId,
+    channels: {
+      [channelId]: {
+        ...accountConfig,
+        accounts: {
+          [accountId]: accountConfig,
         },
       },
     },
+  };
 
-    accountId,
-    account: {
+  // Resolve the account through the plugin's own resolver when available.
+  //
+  // This is critical for channels whose credentials are NOT held in the
+  // bridge config — e.g. openclaw-weixin stores its token/baseUrl in the
+  // plugin's state dir at QR-login time, keyed by a server-assigned ID the
+  // bridge cannot predict. The plugin's `config.resolveAccount(cfg, id)`
+  // reads that state and returns an HONEST `configured` flag plus the real
+  // token/baseUrl.
+  //
+  // Without this, the bridge fabricates `configured: true` from an empty
+  // config and the plugin's gateway proceeds with `token: undefined` /
+  // `baseUrl: undefined`, which crashes the long-poll loop
+  // (`undefined.endsWith(...)` -> TypeError) and never receives messages.
+  //
+  // For plugins that don't expose resolveAccount (or for which the bridge
+  // config genuinely carries credentials, e.g. lark/qqbot), we fall back to
+  // the previous behavior of merging the account config directly.
+  let account: Record<string, any>;
+  const resolveAccount = plugin?.config?.resolveAccount;
+  if (typeof resolveAccount === "function") {
+    try {
+      account = resolveAccount(cfg, accountId) ?? {
+        accountId,
+        configured: false,
+        enabled: true,
+      };
+    } catch (err) {
+      log.warn("plugin config.resolveAccount() threw, falling back to fabricated account", {
+        channelId,
+        accountId,
+        error: String(err),
+      });
+      account = { accountId, configured: false, enabled: true, ...accountConfig };
+    }
+  } else {
+    account = {
       accountId,
       configured: true,
       enabled: true,
       ...accountConfig,
-    },
+    };
+  }
+
+  return {
+    cfg,
+
+    accountId,
+    account,
 
     runtime: {
       version: "2026.6.10",

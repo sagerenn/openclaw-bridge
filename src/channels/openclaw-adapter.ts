@@ -73,6 +73,26 @@ export class OpenClawChannelAdapter implements ChannelAdapter {
     return [...this.handles.keys()];
   }
 
+  listSavedAccountIds(): string[] {
+    // Plugins that persist credentials out-of-band (e.g. openclaw-weixin,
+    // written by QR login) expose `config.listAccountIds(cfg)` to enumerate
+    // them. The bridge cfg we pass is the same one built in start(), so
+    // resolveAccount/listAccountIds see the channel section they expect.
+    const list = this.plugin?.config?.listAccountIds;
+    if (typeof list !== "function") return [];
+    try {
+      const cfg = {
+        channel: this.channelId,
+        channels: { [this.channelId]: { accounts: {} } },
+      };
+      const ids = list(cfg);
+      return Array.isArray(ids) ? ids.filter((id) => typeof id === "string") : [];
+    } catch (err) {
+      log.warn("listSavedAccountIds failed", { channelId: this.channelId, error: String(err) });
+      return [];
+    }
+  }
+
   getStatus(accountId: string): ChannelStatus {
     return this.statuses.get(accountId) ?? {
       channel: this.channelId,
@@ -105,6 +125,7 @@ export class OpenClawChannelAdapter implements ChannelAdapter {
       credentials,
       abortController.signal,
       onDeliver,
+      this.plugin,
     );
 
     const handle: AccountHandle = {
