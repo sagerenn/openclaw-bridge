@@ -28,6 +28,8 @@ import type { NormalizedInboundMessage, ChannelStatus } from "../protocol/messag
 import {
   buildGatewayContext,
   buildPluginApi,
+  registerBundledDeliver,
+  unregisterBundledDeliver,
   type DeliverInterceptor,
 } from "./runtime-shim.js";
 import { toQrImageDataUrl } from "./qr-util.js";
@@ -41,6 +43,14 @@ interface AccountHandle {
   accountId: string;
   abortController: AbortController;
   connected: boolean;
+  /**
+   * The openclaw-shaped config object built for this account (the same `cfg`
+   * passed to gateway.startAccount). Plugins' outbound.sendText/sendMedia
+   * re-resolve the account from `cfg.channels.<id>.accounts.<accountId>`,
+   * so outbound needs the SAME cfg — not an empty object — to find host/nick/
+   * token etc. (e.g. the bundled IRC plugin's `resolveIrcAccount`).
+   */
+  cfg: Record<string, any>;
 }
 
 // ─── Adapter ─────────────────────────────────────────────────────────────────
@@ -118,6 +128,14 @@ export class OpenClawChannelAdapter implements ChannelAdapter {
       this.emitDeliverAsInbound(accountId, payload);
     };
 
+    // For bundled channels (irc/mattermost/…), inbound is routed through a
+    // shared per-plugin core (see buildBundledChannelCore) whose dispatch
+    // looks the account up in a registry. Register this account's deliver
+    // interceptor so inbound reaches the right WS subscription. This is a
+    // no-op for separately-published plugins, which route via the
+    // createReplyDispatcherWithTyping deliver seam in buildGatewayContext.
+    registerBundledDeliver(this.channelId, accountId, onDeliver);
+
     // Build the gateway context with our runtime shim
     const ctx = buildGatewayContext(
       this.channelId,
@@ -132,6 +150,7 @@ export class OpenClawChannelAdapter implements ChannelAdapter {
       accountId,
       abortController,
       connected: false,
+      cfg: ctx.cfg,
     };
 
     this.handles.set(accountId, handle);
@@ -197,6 +216,7 @@ export class OpenClawChannelAdapter implements ChannelAdapter {
 
     handle.connected = false;
     this.handles.delete(accountId);
+    unregisterBundledDeliver(this.channelId, accountId);
     this.updateStatus(accountId, "disconnected", "Stopped");
   }
 
@@ -220,7 +240,7 @@ export class OpenClawChannelAdapter implements ChannelAdapter {
 
     try {
       const result = await outbound.sendText({
-        cfg: {},
+        cfg: handle.cfg,
         to: params.to,
         text: params.text,
         accountId,
@@ -257,7 +277,7 @@ export class OpenClawChannelAdapter implements ChannelAdapter {
 
     try {
       const result = await outbound.sendMedia({
-        cfg: {},
+        cfg: handle.cfg,
         to: params.to,
         mediaUrl: params.mediaUrl,
         text: params.text,
@@ -291,7 +311,7 @@ export class OpenClawChannelAdapter implements ChannelAdapter {
     if (outbound?.sendTyping) {
       try {
         await outbound.sendTyping({
-          cfg: {},
+          cfg: handle.cfg,
           to: params.to,
           typing: params.typing,
           accountId,
@@ -388,13 +408,16 @@ export class OpenClawChannelAdapter implements ChannelAdapter {
     const normalized: NormalizedInboundMessage = {
       channel: this.channelId,
       accountId,
-      messageId: ctx?.messageId ?? ctx?.id ?? `deliver-${Date.now()}`,
-      chatId: ctx?.chatId ?? ctx?.peer ?? ctx?.from ?? "",
-      senderId: ctx?.senderId ?? ctx?.from ?? "",
-      senderName: ctx?.senderName ?? ctx?.fromName,
+      // Bundled openclaw channels (e.g. IRC) carry PascalCase fields on the
+      // inbound context (MessageSid, SenderId, From, Timestamp, …); plugins
+      // installed as separate packages use camelCase (messageId, senderId…).
+      messageId: ctx?.messageId ?? ctx?.MessageSid ?? ctx?.MessageId ?? ctx?.id ?? `deliver-${Date.now()}`,
+      chatId: ctx?.chatId ?? ctx?.ChatId ?? ctx?.peer ?? ctx?.Peer ?? ctx?.from ?? ctx?.From ?? "",
+      senderId: ctx?.senderId ?? ctx?.SenderId ?? ctx?.from ?? ctx?.From ?? "",
+      senderName: ctx?.senderName ?? ctx?.SenderName ?? ctx?.fromName ?? ctx?.FromName,
       msgType: payload.mediaUrl || payload.mediaUrls?.length ? "media" : "text",
       text: payload.text ?? "",
-      timestamp: ctx?.timestamp ?? Date.now(),
+      timestamp: ctx?.timestamp ?? ctx?.Timestamp ?? Date.now(),
       mediaUrl: payload.mediaUrl ?? payload.mediaUrls?.[0],
       mediaType: payload.mediaUrl ? "image" : undefined,
       raw: ctx,

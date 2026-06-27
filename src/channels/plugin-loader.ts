@@ -18,7 +18,7 @@
 import { discoverPlugins } from "./channel-manager.js";
 import type { ChannelAdapter } from "./channel-adapter.js";
 import { OpenClawChannelAdapter } from "./openclaw-adapter.js";
-import { buildPluginApi } from "./runtime-shim.js";
+import { buildPluginApi, buildBundledChannelCore } from "./runtime-shim.js";
 import { patchLarkPlugin } from "../util/patch-lark-plugin.js";
 import { rootLogger } from "../util/logger.js";
 
@@ -194,13 +194,47 @@ export async function loadChannelAdapters(): Promise<Map<string, ChannelAdapter>
       log.info("Loading plugin entry point", { pluginId: plugin.id, entryPath: plugin.entryPath });
       const mod = await import(plugin.entryPath);
 
-      // Extract the ChannelPlugin from the module
-      const channelPlugin = extractChannelPlugin(mod, plugin.id);
+      // Bundled channels (inside the openclaw host package) ship a
+      // `BundledChannelEntryContract` as their default export, with a
+      // `loadChannelPlugin()` accessor and a `setChannelRuntime(core)`
+      // installer. Unlike separately-published plugins, they gate their
+      // gateway on a module-level runtime store that must be populated before
+      // `gateway.startAccount()` is called — so install the bridge's shim core
+      // here, once per plugin.
+      const entryContract = mod?.default;
+      const isBundledEntry =
+        plugin.bundled &&
+        entryContract &&
+        entryContract.kind === "bundled-channel-entry" &&
+        typeof entryContract.loadChannelPlugin === "function";
+
+      let channelPlugin: Record<string, any> | undefined;
+
+      if (isBundledEntry) {
+        channelPlugin = entryContract.loadChannelPlugin();
+        if (typeof entryContract.setChannelRuntime === "function") {
+          try {
+            entryContract.setChannelRuntime(buildBundledChannelCore(plugin.id));
+            log.info("Installed bundled channel runtime", { pluginId: plugin.id });
+          } catch (err: any) {
+            log.warn("setChannelRuntime failed (bundled channel may not receive inbound)", {
+              pluginId: plugin.id,
+              error: String(err),
+            });
+          }
+        }
+      } else {
+        // Separately-published plugin — extract the ChannelPlugin via the
+        // standard register()/direct-export heuristics.
+        channelPlugin = extractChannelPlugin(mod, plugin.id);
+      }
+
       if (!channelPlugin) {
         log.warn("Could not extract ChannelPlugin from module, skipping", {
           pluginId: plugin.id,
           entryPath: plugin.entryPath,
           moduleKeys: Object.keys(mod),
+          bundled: plugin.bundled,
         });
         continue;
       }
@@ -215,6 +249,7 @@ export async function loadChannelAdapters(): Promise<Map<string, ChannelAdapter>
           pluginId: plugin.id,
           channelId,
           adapterLabel: adapter.label,
+          bundled: plugin.bundled,
         });
       }
     } catch (err) {

@@ -31,6 +31,13 @@ interface DiscoveredPlugin {
   manifest: PluginManifest;
   /** Entry point path from package.json openclaw.extensions or openclaw.runtimeExtensions */
   entryPath?: string;
+  /**
+   * Whether this is a channel bundled inside the `openclaw` host package
+   * (at `dist/extensions/<id>/`) rather than a separately-installed plugin
+   * package. Bundled channels gate their gateway on a module-level runtime
+   * store (setXRuntime) and need `setChannelRuntime(core)` called at load.
+   */
+  bundled?: boolean;
 }
 
 /**
@@ -78,13 +85,55 @@ export function discoverPlugins(searchPaths?: string[]): DiscoveredPlugin[] {
     }
   }
 
+  // Also discover channels BUNDLED inside the `openclaw` host package — they
+  // live at `node_modules/openclaw/dist/extensions/<id>/` and are NOT installed
+  // as separate packages, so the node_modules scan above won't find them.
+  // These are the only self-hostable channels (irc, mattermost, …); the
+  // separately-published plugins target external SaaS IMs.
+  discoverBundledPlugins(plugins, seen);
+
   return plugins;
+}
+
+/**
+ * Discover channel plugins bundled inside the `openclaw` host package at
+ * `dist/extensions/<id>/`. Each extension ships its own openclaw.plugin.json.
+ */
+function discoverBundledPlugins(
+  plugins: DiscoveredPlugin[],
+  seen: Set<string>,
+): void {
+  const candidates: string[] = [];
+  const nm = resolve(process.cwd(), "node_modules");
+  // openclaw may be a direct dependency or a transitive one. Check the common
+  // install locations for an extensions dir.
+  for (const root of [join(nm, "openclaw")]) {
+    candidates.push(join(root, "dist", "extensions"));
+  }
+
+  for (const extDir of candidates) {
+    if (!existsSync(extDir)) continue;
+    let entries: string[];
+    try {
+      entries = readdirSync(extDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name);
+    } catch (err) {
+      log.warn("Failed to scan bundled extensions dir", { extDir, error: String(err) });
+      continue;
+    }
+
+    for (const name of entries) {
+      tryDiscoverPlugin(join(extDir, name), plugins, seen, true);
+    }
+  }
 }
 
 function tryDiscoverPlugin(
   pkgPath: string,
   plugins: DiscoveredPlugin[],
-  seen: Set<string>
+  seen: Set<string>,
+  bundled = false,
 ): void {
   const manifestPath = join(pkgPath, "openclaw.plugin.json");
   if (!existsSync(manifestPath)) return;
@@ -109,15 +158,24 @@ function tryDiscoverPlugin(
       }
     }
 
+    // Bundled extensions sometimes declare no `channels` array in their
+    // package.json openclaw field but DO declare it in the manifest. The
+    // manifest.id is the channel id for these single-channel extensions.
     plugins.push({
       id: manifest.id,
       channels: manifest.channels,
       packagePath: pkgPath,
       manifest,
       entryPath,
+      bundled,
     });
 
-    log.info("Discovered plugin", { id: manifest.id, channels: manifest.channels, pkgPath });
+    log.info("Discovered plugin", {
+      id: manifest.id,
+      channels: manifest.channels,
+      pkgPath,
+      bundled,
+    });
   } catch (err) {
     log.warn("Failed to parse plugin manifest", { path: manifestPath, error: String(err) });
   }

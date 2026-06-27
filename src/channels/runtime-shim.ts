@@ -292,7 +292,32 @@ function buildChannelShim(
       buildContext: (opts: any) => opts,
       run: async () => {},
       runPreparedReply: async () => {},
-      dispatchReply: async () => {},
+      // Route inbound to the bridge's deliver interceptor instead of running
+      // the AI dispatch pipeline. The plugin's inbound handler calls
+      // dispatchReply({ ctxPayload, delivery: { deliver } }). In bridge mode we
+      // do NOT run the LLM, and we do NOT call the plugin's `delivery.deliver`
+      // (that would auto-reply back to the backend — the bridge is a
+      // passthrough, and outbound replies come from WS clients via send_text).
+      // Instead we surface the inbound message to WS clients via onDeliver,
+      // carrying the inbound context (senderId, text, etc.) so the adapter can
+      // normalize it. ctxPayload.Body holds the message body (with envelope);
+      // RawBody holds the raw text.
+      dispatchReply: async (opts: any) => {
+        const ctx = opts?.ctxPayload;
+        // Prefer the raw command body (unwrapped) over the envelope-formatted Body.
+        const text = ctx?.CommandBody ?? ctx?.RawBody ?? ctx?.Body ?? ctx?.body ?? ctx?.rawBody;
+        try {
+          onDeliver({
+            text: typeof text === "string" ? text : undefined,
+            accountId,
+            channelId,
+            inboundContext: ctx,
+          });
+        } catch (err: any) {
+          log.debug("onDeliver() threw in bridge-mode dispatchReply", { error: String(err) });
+        }
+        return { counts: { final: 0, block: 0, tool: 0 } };
+      },
     },
 
     // ── threadBindings ─────────────────────────────────────────────────────
@@ -349,6 +374,131 @@ export function buildPluginRuntime(
       list: async () => ({ nodes: [] }),
       invoke: async () => undefined,
     },
+  };
+}
+
+// ─── Bundled-Channel Runtime Registry ─────────────────────────────────────────
+//
+// Bundled openclaw channels (irc, mattermost, telegram, …) live inside the
+// `openclaw` package at `dist/extensions/<id>/` and are NOT installed as
+// separate node_modules packages. Unlike separately-published plugins
+// (weixin, lark, qqbot), bundled channels gate their gateway on a
+// module-level runtime store populated by `setXRuntime(core)` (e.g.
+// `setIrcRuntime`), and their inbound path routes through
+// `core.channel.inbound.dispatchReply({ ctxPayload, delivery: { deliver } })`
+// rather than the `createReplyDispatcherWithTyping` deliver seam the
+// separately-published plugins use.
+//
+// The runtime store is global per-plugin (one `core` for all accounts), but
+// the bridge routes inbound per-account. We bridge that gap with a registry:
+// each active account registers its `onDeliver` under `channelId:accountId`,
+// and the shared `core.channel.inbound.dispatchReply` looks the right
+// account up from the dispatch opts — so inbound reaches the correct WS
+// subscription even though the runtime is set once at load time.
+
+const bundledDeliverRegistry = new Map<string, DeliverInterceptor>();
+
+function bundledDeliverKey(channelId: string, accountId: string): string {
+  return `${channelId}:${accountId}`;
+}
+
+/** Register (or replace) the deliver interceptor for a bundled-channel account. */
+export function registerBundledDeliver(
+  channelId: string,
+  accountId: string,
+  onDeliver: DeliverInterceptor,
+): void {
+  bundledDeliverRegistry.set(bundledDeliverKey(channelId, accountId), onDeliver);
+}
+
+/** Remove a bundled-channel account's deliver interceptor (on stop). */
+export function unregisterBundledDeliver(channelId: string, accountId: string): void {
+  bundledDeliverRegistry.delete(bundledDeliverKey(channelId, accountId));
+}
+
+/**
+ * Build the `core` runtime object to install via a bundled channel's
+ * `setChannelRuntime(core)`. The `core.channel` surface is the bridge's
+ * standard shim, but its `inbound.dispatchReply` routes inbound to the
+ * per-account `onDeliver` registered for the dispatch's `channel:accountId`
+ * (falling back to the single registered account for the channel when the
+ * dispatch omits an accountId — some bundled channels do).
+ */
+export function buildBundledChannelCore(channelId: string): Record<string, any> {
+  const noop = () => {};
+  // A fallback onDeliver used before any account registers (e.g. during the
+  // brief window between setChannelRuntime and startAccount). Logs and drops.
+  const fallbackDeliver: DeliverInterceptor = (payload) => {
+    log.debug("bundled-channel deliver before account registered", {
+      channelId,
+      text: payload?.text,
+    });
+  };
+
+  const resolveDeliver = (accountId?: string): DeliverInterceptor => {
+    if (accountId) {
+      const exact = bundledDeliverRegistry.get(bundledDeliverKey(channelId, accountId));
+      if (exact) return exact;
+    }
+    // Fall back to the first registered account for this channel.
+    const prefix = `${channelId}:`;
+    for (const [key, deliver] of bundledDeliverRegistry) {
+      if (key.startsWith(prefix)) return deliver;
+    }
+    return fallbackDeliver;
+  };
+
+  // Build a per-dispatch channel shim: inbound.dispatchReply resolves the
+  // account from opts and routes to that account's onDeliver.
+  const channel = buildChannelShim(channelId, "default", fallbackDeliver);
+  channel.inbound = {
+    buildContext: (opts: any) => opts,
+    run: async () => {},
+    runPreparedReply: async () => {},
+    dispatchReply: async (opts: any) => {
+      const ctx = opts?.ctxPayload;
+      const text = ctx?.CommandBody ?? ctx?.RawBody ?? ctx?.Body ?? ctx?.body ?? ctx?.rawBody;
+      const dispatchChannelId = opts?.channel ?? channelId;
+      const dispatchAccountId = opts?.accountId ?? opts?.ctxPayload?.AccountId;
+      const deliver = resolveDeliver(dispatchAccountId);
+      try {
+        deliver({
+          text: typeof text === "string" ? text : undefined,
+          accountId: dispatchAccountId ?? "default",
+          channelId: dispatchChannelId,
+          inboundContext: ctx,
+        });
+      } catch (err: any) {
+        log.debug("onDeliver() threw in bundled dispatchReply", {
+          channelId: dispatchChannelId,
+          accountId: dispatchAccountId,
+          error: String(err),
+        });
+      }
+      return { counts: { final: 0, block: 0, tool: 0 } };
+    },
+  };
+
+  return {
+    version: "2026.6.10",
+    log: (msg: string) => log.debug("[bundled-core]", { channelId, msg }),
+    error: (msg: string) => log.error("[bundled-core]", { channelId, msg }),
+    logging: {
+      getChildLogger: (_opts?: any) => ({
+        debug: noop,
+        info: noop,
+        warn: noop,
+        error: (m: string) => log.debug(`[bundled:${channelId}]`, { msg: String(m) }),
+        trace: noop,
+      }),
+      shouldLogVerbose: () => false,
+      debug: noop,
+      info: noop,
+      warn: noop,
+      error: noop,
+    },
+    channel,
+    config: { current: () => ({}) },
   };
 }
 

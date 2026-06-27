@@ -48,6 +48,64 @@ jobs:
       - name: Run spec E2E test
         run: npm run test:e2e:spec
 
+  # ─── IRC E2E (full round-trip against a real self-hosted IM server) ─────────
+  # The only channel E2E suite that runs credential-free in CI: it spins up an
+  # Ergo IRC daemon as a service container and exercises the complete pipeline
+  #   WS client ──[WebSocket]──▶ Bridge ──[irc channel plugin]──▶ Ergo
+  # exchanging 3 messages (3 outbound + 3 inbound) round-trip. This validates
+  # that the bridge can load the bundled `irc` channel plugin from inside the
+  # `openclaw` package, route outbound through plugin.outbound, and route
+  # inbound through the plugin gateway's deliver() seam back to WS clients.
+  #
+  # Ergo's default config already allows credential-free plaintext nick
+  # registration on :6667 and unauthenticated DMs, so no custom config or
+  # account provisioning is needed — the test registers two throwaway nicks
+  # (the bot and an in-process "real IM user") directly.
+  e2e-irc:
+    name: IRC E2E (real Ergo server)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      ergo:
+        # Ergo is a lightweight, dependency-free IRC daemon (~20-40MB RAM, no
+        # external DB) — the lowest-resource self-hostable IM with an openclaw
+        # channel plugin. Plaintext IRC on :6667 out of the box.
+        image: ghcr.io/ergochat/ergo:latest
+        ports:
+          - 6667:6667
+        options: >-
+          --health-cmd "nc -z 127.0.0.1 6667 || exit 1"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      # `npm ci` runs the postinstall hook, which builds dist/ and patches the
+      # lark plugin — so dist/ is ready for the test step.
+      - name: Install
+        run: npm ci
+
+      - name: Type-check
+        run: npm run build
+
+      - name: Run IRC round-trip E2E test (3 messages)
+        env:
+          IRC_HOST: 127.0.0.1
+          IRC_PORT: "6667"
+          IRC_BOT_NICK: openclaw-bot
+          IRC_SENDER_NICK: e2e-sender
+          BRIDGE_PORT: "9498"
+        run: npm run test:e2e:irc
+
   # ─── Docker (multi-arch) ────────────────────────────────────────────────────
   # Builds linux/amd64 + linux/arm64 images and publishes them. Pushes on:
   #   - main  -> :latest + :sha + :branch
