@@ -194,16 +194,19 @@ export async function loadChannelAdapters(): Promise<Map<string, ChannelAdapter>
       log.info("Loading plugin entry point", { pluginId: plugin.id, entryPath: plugin.entryPath });
       const mod = await import(plugin.entryPath);
 
-      // Bundled channels (inside the openclaw host package) ship a
+      // Some channel plugins (both bundled-inside-the-host AND
+      // separately-published ones like @openclaw/whatsapp) ship a
       // `BundledChannelEntryContract` as their default export, with a
       // `loadChannelPlugin()` accessor and a `setChannelRuntime(core)`
-      // installer. Unlike separately-published plugins, they gate their
-      // gateway on a module-level runtime store that must be populated before
-      // `gateway.startAccount()` is called — so install the bridge's shim core
-      // here, once per plugin.
+      // installer. These plugins gate their gateway on a module-level runtime
+      // store (e.g. whatsapp's getWhatsAppRuntime()) that must be populated
+      // before `gateway.startAccount()` is called — otherwise startAccount
+      // crashes on the first runtime access (e.g. logging.shouldLogVerbose).
+      // So: whenever the default export IS a bundled-channel-entry contract,
+      // use it and install the bridge's shim core, regardless of whether the
+      // plugin was discovered as "bundled" (host-internal) or not.
       const entryContract = mod?.default;
       const isBundledEntry =
-        plugin.bundled &&
         entryContract &&
         entryContract.kind === "bundled-channel-entry" &&
         typeof entryContract.loadChannelPlugin === "function";
@@ -215,7 +218,7 @@ export async function loadChannelAdapters(): Promise<Map<string, ChannelAdapter>
         if (typeof entryContract.setChannelRuntime === "function") {
           try {
             entryContract.setChannelRuntime(buildBundledChannelCore(plugin.id));
-            log.info("Installed bundled channel runtime", { pluginId: plugin.id });
+            log.info("Installed bundled channel runtime", { pluginId: plugin.id, bundled: plugin.bundled });
           } catch (err: any) {
             log.warn("setChannelRuntime failed (bundled channel may not receive inbound)", {
               pluginId: plugin.id,

@@ -33,6 +33,15 @@
         "default": {}
       },
       "_comment": "WeChat uses QR code login — leave accounts empty and visit /plugin/openclaw-weixin/default/qr to scan"
+    },
+    "whatsapp": {
+      "enabled": true,
+      "accounts": {
+        "default": {}
+      },
+      "dmPolicy": "pairing",
+      "allowFrom": ["+15551234567"],
+      "_comment": "WhatsApp (@openclaw/whatsapp) links via QR — leave accounts empty and visit /plugin/whatsapp/default/qr to scan. allowFrom is E.164 numbers; dmPolicy 'pairing' lets unknown senders request access."
     }
   },
   "logging": {

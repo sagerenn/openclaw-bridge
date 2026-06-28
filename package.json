@@ -19,17 +19,21 @@
     "test:e2e:irc": "node dist/test/e2e-test-irc.js",
     "test:e2e:mattermost": "node dist/test/e2e-test-mattermost.js",
     "test:e2e:telegram": "node dist/test/e2e-test-telegram.js",
+    "test:e2e:whatsapp": "node dist/test/e2e-test-whatsapp.js",
     "patch:lark": "node dist/util/patch-lark-plugin.js",
     "postinstall": "npm run build && node dist/util/patch-lark-plugin.js || true",
     "install:liangzimixin": "npm install liangzimixin",
     "install:weixin": "npm install @tencent-weixin/openclaw-weixin",
+    "install:whatsapp": "npm install @openclaw/whatsapp",
     "install:lark": "npm install @larksuite/openclaw-lark && npm run build && node dist/util/patch-lark-plugin.js"
   },
   "dependencies": {
     "@larksuite/openclaw-lark": "^2026.6.10",
+    "@openclaw/whatsapp": "^2026.6.10",
     "@tencent-connect/openclaw-qqbot": "^1.7.2",
     "@tencent-weixin/openclaw-weixin": "^2.4.6",
     "@types/qrcode": "^1.5.6",
+    "baileys": "^7.0.0-rc13",
     "openclaw": "^2026.6.10",
     "qrcode": "^1.5.4",
     "ws": "^8.21.0"

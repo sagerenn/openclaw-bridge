@@ -10,7 +10,7 @@
  * route them to WS clients via the bridge's message bus.
  */
 
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { rootLogger } from "../util/logger.js";
@@ -740,6 +740,23 @@ function createInMemoryChannelIngressQueue(options: {
  * (falling back to the single registered account for the channel when the
  * dispatch omits an accountId — some bundled channels do).
  */
+/**
+ * Resolve the mutable openclaw state directory for bundled/entry-contract
+ * channels that call `runtime.state.resolveStateDir()` (e.g. whatsapp's
+ * monitor). Honors OPENCLAW_STATE_DIR; otherwise defaults to ~/.openclaw.
+ * Created lazily so plugin state writes (logs/sessions) don't ENOENT.
+ */
+function resolveBundledStateDir(): string {
+  const override = process.env.OPENCLAW_STATE_DIR?.trim();
+  const dir = override || join(homedir() || "/root", ".openclaw");
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch {
+    // best-effort; the plugin will surface a clearer error on write
+  }
+  return dir;
+}
+
 export function buildBundledChannelCore(channelId: string): Record<string, any> {
   const noop = () => {};
   // A fallback onDeliver used before any account registers (e.g. during the
@@ -909,6 +926,11 @@ export function buildBundledChannelCore(channelId: string): Record<string, any> 
         }
         return queue;
       },
+      // Bundled/entry-contract channels (e.g. whatsapp's monitor) call this to
+      // resolve the mutable state directory (logs/sessions caches). Default to
+      // the openclaw state dir (~/.openclaw, or OPENCLAW_STATE_DIR override),
+      // creating it lazily so plugin state writes don't fail.
+      resolveStateDir: () => resolveBundledStateDir(),
     },
   };
 }
