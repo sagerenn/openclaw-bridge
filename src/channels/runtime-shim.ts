@@ -167,10 +167,12 @@ function buildChannelShim(
       dispatchReplyFromConfig: async (opts: any) => {
         const ctx = opts?.ctx;
         const text = ctx?.CommandBody ?? ctx?.RawBody ?? ctx?.Body ?? ctx?.body ?? ctx?.rawBody;
+        const dispatchAccountId = opts?.accountId ?? ctx?.AccountId ?? accountId;
+        const deliver = resolveDeliverFor(channelId, dispatchAccountId, onDeliver);
         try {
-          onDeliver({
+          deliver({
             text: typeof text === "string" ? text : undefined,
-            accountId,
+            accountId: dispatchAccountId ?? accountId,
             channelId,
             inboundContext: ctx,
           });
@@ -185,19 +187,30 @@ function buildChannelShim(
 
       /**
        * Dispatch reply with buffered block dispatcher.
-       * Same as above — skip AI, intercept deliver.
+       * Same as {@link dispatchReplyFromConfig} — skip AI, surface the inbound
+       * context to WS clients via onDeliver. This is the dispatch entry the
+       * qqbot gateway calls (pluginRuntime.channel.reply
+       * .dispatchReplyWithBufferedBlockDispatcher({ ctx, … })) with a `ctx`
+       * carrying the finalized inbound context (SenderId, SenderName,
+       * MessageSid, CommandBody/RawBody = text, OriginatingTo = reply target).
+       * Without surfacing it here, qqbot inbound was silently dropped and
+       * never reached WS clients.
        */
       dispatchReplyWithBufferedBlockDispatcher: async (opts: any) => {
-        const deliver = opts.dispatcherOptions?.deliver;
-        if (deliver) {
-          // The plugin expects deliver to be called for each reply block.
-          // In bridge mode, we don't generate AI replies, so deliver is never called.
-          // The plugin's inbound pipeline will call deliver when it has something to send.
+        const ctx = opts?.ctx;
+        const text = ctx?.CommandBody ?? ctx?.RawBody ?? ctx?.Body ?? ctx?.body ?? ctx?.rawBody;
+        const dispatchAccountId = opts?.accountId ?? ctx?.AccountId ?? accountId;
+        const deliver = resolveDeliverFor(channelId, dispatchAccountId, onDeliver);
+        try {
+          deliver({
+            text: typeof text === "string" ? text : undefined,
+            accountId: dispatchAccountId ?? accountId,
+            channelId,
+            inboundContext: ctx,
+          });
+        } catch (err: any) {
+          log.debug("onDeliver() threw in dispatchReplyWithBufferedBlockDispatcher", { error: String(err) });
         }
-        log.debug("dispatchReplyWithBufferedBlockDispatcher called (AI dispatch skipped — bridge mode)", {
-          channelId,
-          accountId,
-        });
         return {
           counts: { final: 0, block: 0, tool: 0 },
         };
@@ -224,6 +237,7 @@ function buildChannelShim(
         `${channelId}:${opts?.accountId ?? accountId}:${opts?.agentId ?? "default"}`,
       resolveAgentRoute: (opts: any) => ({
         agentId: opts?.cfg?.agentId ?? "default",
+        accountId: opts?.accountId ?? accountId,
         sessionKey: `${channelId}:${opts?.accountId ?? accountId}:default`,
         mainSessionKey: `${channelId}:${opts?.accountId ?? accountId}:default`,
       }),
@@ -507,6 +521,48 @@ export function registerBundledDeliver(
 /** Remove a bundled-channel account's deliver interceptor (on stop). */
 export function unregisterBundledDeliver(channelId: string, accountId: string): void {
   bundledDeliverRegistry.delete(bundledDeliverKey(channelId, accountId));
+}
+
+/**
+ * Resolve the live deliver interceptor for a (channelId, accountId), falling
+ * back to the first registered account for the channel, then to `fallback`.
+ *
+ * Separately-published plugins that use the `register(api)` pattern
+ * (e.g. @tencent-connect/openclaw-qqbot) call `setQQBotRuntime(api.runtime)`
+ * during extraction — capturing the *extraction-time* shim, whose closure
+ * `onDeliver` is the no-op `() => {}` passed to `buildPluginApi`. The real
+ * per-account deliver (registered by openclaw-adapter.start() via
+ * registerBundledDeliver) never reaches them. Reply-surface dispatch methods
+ * therefore resolve the live deliver from the registry here instead of
+ * relying on the closure, so inbound surfaces to WS clients for these plugins
+ * too. Mirrors `buildBundledChannelCore`'s resolveDeliver.
+ */
+function resolveDeliverFor(
+  channelId: string,
+  accountId: string | undefined,
+  fallback: DeliverInterceptor,
+): DeliverInterceptor {
+  if (accountId) {
+    const exact = bundledDeliverRegistry.get(bundledDeliverKey(channelId, accountId));
+    if (exact) return exact;
+  }
+  const prefix = `${channelId}:`;
+  for (const [key, deliver] of bundledDeliverRegistry) {
+    if (key.startsWith(prefix)) return deliver;
+  }
+  // Separately-published plugins (e.g. @tencent-connect/openclaw-qqbot) hold
+  // the *extraction-time* runtime shim, which was built with the plugin
+  // package id ("openclaw-qqbot") as channelId, while openclaw-adapter
+  // registers its deliver under the channel id ("qqbot"). Neither matches the
+  // other, so the exact/prefix lookups above miss. As a last resort, fall back
+  // to the single registered deliver for the given accountId (these plugins
+  // run one account per channel, so this is unambiguous).
+  if (accountId) {
+    for (const [key, deliver] of bundledDeliverRegistry) {
+      if (key.endsWith(`:${accountId}`)) return deliver;
+    }
+  }
+  return fallback;
 }
 
 /**
