@@ -485,6 +485,12 @@ export function buildPluginRuntime(
 
 const bundledDeliverRegistry = new Map<string, DeliverInterceptor>();
 
+// Stable in-memory ingress queues for bundled channels that spool inbound
+// (telegram). Keyed by `${channelId}:${accountId}` so a queue handle returned
+// by state.openChannelIngressQueue persists across the spooler's per-operation
+// lookups.
+const bundledIngressQueues = new Map<string, ReturnType<typeof createInMemoryChannelIngressQueue>>();
+
 function bundledDeliverKey(channelId: string, accountId: string): string {
   return `${channelId}:${accountId}`;
 }
@@ -501,6 +507,229 @@ export function registerBundledDeliver(
 /** Remove a bundled-channel account's deliver interceptor (on stop). */
 export function unregisterBundledDeliver(channelId: string, accountId: string): void {
   bundledDeliverRegistry.delete(bundledDeliverKey(channelId, accountId));
+}
+
+/**
+ * Minimal in-process ingress queue for bundled channels whose gateway spools
+ * inbound events before dispatch (e.g. telegram's long-poll spooler).
+ *
+ * The real OpenClaw runtime backs this with the durable state SQLite DB
+ * (`createChannelIngressQueue`). The bridge runs a single process per account,
+ * so durability across crashes / multi-process claiming is not needed here —
+ * an in-memory implementation satisfies the same contract the spooler reads:
+ * enqueue / listPending / listClaims / claim / release / fail / delete /
+ * recoverStaleClaims / prune, with records carrying { id, accountId, payload,
+ * claim, status, receivedAt, updatedAt, attempts, lastError, laneKey }.
+ *
+ * Without `state.openChannelIngressQueue`, the telegram gateway crashes on
+ * startup ("Cannot read properties of undefined (reading 'openChannelIngressQueue')")
+ * because `getTelegramRuntime().state` is otherwise undefined.
+ */
+function createInMemoryChannelIngressQueue(options: {
+  channelId: string;
+  accountId: string;
+}) {
+  const channelId = options.channelId;
+  const accountId = options.accountId;
+  type Status = "pending" | "claimed" | "completed" | "failed";
+  interface Rec {
+    id: string;
+    payload: any;
+    metadata?: any;
+    status: Status;
+    laneKey: string | null;
+    receivedAt: number;
+    updatedAt: number;
+    attempts: number;
+    lastAttemptAt: number | null;
+    lastError: string | null;
+    completedAt?: number | null;
+    completedMetadata?: any;
+    failedAt?: number | null;
+    failedReason?: string | null;
+    claim?: { token: string; ownerId: string; claimedAt: number } | null;
+  }
+  const now = () => Date.now();
+  const byId = new Map<string, Rec>();
+
+  const base = (r: Rec) => ({
+    id: r.id,
+    channelId,
+    accountId,
+    queueName: JSON.stringify([channelId, accountId]),
+    payload: r.payload,
+    ...(r.metadata === undefined ? {} : { metadata: r.metadata }),
+    receivedAt: r.receivedAt,
+    updatedAt: r.updatedAt,
+    ...(r.laneKey === null ? {} : { laneKey: r.laneKey }),
+    attempts: r.attempts,
+    ...(r.lastAttemptAt === null ? {} : { lastAttemptAt: r.lastAttemptAt }),
+    ...(r.lastError === null ? {} : { lastError: r.lastError }),
+  });
+  const claimed = (r: Rec) => ({
+    ...base(r),
+    claim: {
+      token: r.claim?.token ?? "",
+      ownerId: r.claim?.ownerId ?? "",
+      claimedAt: r.claim?.claimedAt ?? 0,
+    },
+  });
+
+  const claimTokenFrom = (idOrClaim: any): string | null =>
+    typeof idOrClaim === "string" ? null : idOrClaim?.claim?.token ?? null;
+  const idFrom = (idOrClaim: any): string => {
+    const id = (typeof idOrClaim === "string" ? idOrClaim : idOrClaim?.id ?? "").trim();
+    if (!id) throw new Error("Channel ingress event id cannot be empty");
+    return id;
+  };
+
+  return {
+    enqueue: async (id: string, payload: any, enqueueOptions?: any) => {
+      const eventId = (id ?? "").trim();
+      if (!eventId) throw new Error("Channel ingress event id cannot be empty");
+      const receivedAt = enqueueOptions?.receivedAt ?? now();
+      const updatedAt = now();
+      const existing = byId.get(eventId);
+      if (existing) {
+        if (existing.status === "completed")
+          return { kind: "completed", duplicate: true, record: { ...base(existing), completedAt: existing.completedAt ?? existing.updatedAt, ...(existing.completedMetadata === undefined ? {} : { metadata: existing.completedMetadata }) } };
+        if (existing.status === "failed")
+          return { kind: "failed", duplicate: true, record: { ...base(existing), failedAt: existing.failedAt ?? existing.updatedAt, reason: existing.failedReason ?? "failed", ...(existing.lastError === null ? {} : { message: existing.lastError }) } };
+        if (existing.status === "claimed") return { kind: "claimed", duplicate: true, record: claimed(existing) };
+        return { kind: "pending", duplicate: true, record: base(existing) };
+      }
+      const rec: Rec = {
+        id: eventId,
+        payload,
+        metadata: enqueueOptions?.metadata,
+        status: "pending",
+        laneKey: enqueueOptions?.laneKey ?? null,
+        receivedAt,
+        updatedAt,
+        attempts: 0,
+        lastAttemptAt: null,
+        lastError: null,
+      };
+      byId.set(eventId, rec);
+      return { kind: "accepted", duplicate: false, record: base(rec) };
+    },
+    listPending: async (listOptions?: any) => {
+      const limit = Math.max(1, Math.floor(listOptions?.limit ?? 100));
+      let rows = [...byId.values()].filter((r) => r.status === "pending");
+      rows = listOptions?.orderBy === "id"
+        ? rows.sort((a, b) => a.id.localeCompare(b.id))
+        : rows.sort((a, b) => a.receivedAt - b.receivedAt || a.id.localeCompare(b.id));
+      return rows.slice(0, limit).map(base);
+    },
+    listClaims: async () =>
+      [...byId.values()]
+        .filter((r) => r.status === "claimed")
+        .sort((a, b) => (a.claim!.claimedAt - b.claim!.claimedAt) || (a.receivedAt - b.receivedAt) || a.id.localeCompare(b.id))
+        .map(claimed),
+    claimNext: async (_claimOptions?: any) => null,
+    claim: async (id: any, claimOptions?: any) => {
+      const eventId = idFrom(id);
+      const rec = byId.get(eventId);
+      if (!rec || rec.status !== "pending") return null;
+      const token = `${eventId}-${now()}-${Math.random().toString(36).slice(2)}`;
+      const claimedAt = now();
+      const ownerId = (claimOptions?.ownerId ?? `${process.pid}`).trim() || `${process.pid}`;
+      rec.status = "claimed";
+      rec.claim = { token, ownerId, claimedAt };
+      rec.updatedAt = claimedAt;
+      return claimed(rec);
+    },
+    recoverStaleClaims: async (_recoverOptions?: any) => {
+      const staleMs = Math.max(0, Math.floor(_recoverOptions?.staleMs ?? 0));
+      const cutoff = (_recoverOptions?.now ?? now()) - staleMs;
+      let recovered = 0;
+      for (const rec of byId.values()) {
+        if (rec.status !== "claimed") continue;
+        if (rec.claim && rec.claim.claimedAt > cutoff) continue;
+        if (_recoverOptions?.shouldRecover && !(await _recoverOptions.shouldRecover(claimed(rec)))) continue;
+        rec.status = "pending";
+        rec.claim = null;
+        rec.updatedAt = now();
+        recovered += 1;
+      }
+      return recovered;
+    },
+    complete: async (idOrClaim: any, completeOptions?: any) => {
+      const eventId = idFrom(idOrClaim);
+      const token = claimTokenFrom(idOrClaim);
+      const completedAt = completeOptions?.completedAt ?? now();
+      const rec = byId.get(eventId);
+      if (!rec) {
+        // Match the real impl: a tokenless complete on an unknown id inserts a
+        // completed tombstone so a replayed update is not re-enqueued.
+        if (token !== null) return false;
+        byId.set(eventId, {
+          id: eventId, payload: null, status: "completed", laneKey: null,
+          receivedAt: completedAt, updatedAt: completedAt, attempts: 0,
+          lastAttemptAt: null, lastError: null, completedAt,
+          completedMetadata: completeOptions?.metadata,
+        });
+        return true;
+      }
+      if (token !== null && (rec.status !== "claimed" || rec.claim?.token !== token)) return false;
+      if (token === null && rec.status !== "pending") return false;
+      rec.status = "completed";
+      rec.completedAt = completedAt;
+      rec.completedMetadata = completeOptions?.metadata;
+      rec.payload = null;
+      rec.metadata = undefined;
+      rec.claim = null;
+      rec.lastAttemptAt = null;
+      rec.lastError = null;
+      rec.updatedAt = completedAt;
+      return true;
+    },
+    release: async (idOrClaim: any, releaseOptions?: any) => {
+      const eventId = idFrom(idOrClaim);
+      const token = claimTokenFrom(idOrClaim);
+      const releasedAt = releaseOptions?.releasedAt ?? now();
+      const rec = byId.get(eventId);
+      if (!rec) return false;
+      if (token !== null && (rec.status !== "claimed" || rec.claim?.token !== token)) return false;
+      if (token === null && rec.status !== "pending") return false;
+      rec.status = "pending";
+      rec.claim = null;
+      rec.attempts += 1;
+      rec.lastAttemptAt = releasedAt;
+      if (releaseOptions?.lastError !== undefined) rec.lastError = releaseOptions.lastError;
+      rec.updatedAt = releasedAt;
+      return true;
+    },
+    fail: async (idOrClaim: any, failOptions: any) => {
+      const eventId = idFrom(idOrClaim);
+      const token = claimTokenFrom(idOrClaim);
+      const failedAt = failOptions?.failedAt ?? now();
+      const rec = byId.get(eventId);
+      if (!rec) return false;
+      if (token !== null && (rec.status !== "claimed" || rec.claim?.token !== token)) return false;
+      if (token === null && rec.status !== "pending") return false;
+      rec.status = "failed";
+      rec.failedAt = failedAt;
+      rec.failedReason = failOptions?.reason;
+      rec.lastError = failOptions?.message ?? null;
+      rec.payload = null;
+      rec.metadata = undefined;
+      rec.claim = null;
+      rec.updatedAt = failedAt;
+      return true;
+    },
+    delete: async (idOrRecord: any) => {
+      const eventId = idFrom(idOrRecord);
+      const token = claimTokenFrom(idOrRecord);
+      const rec = byId.get(eventId);
+      if (!rec) return false;
+      if (token !== null && (rec.status !== "claimed" || rec.claim?.token !== token)) return false;
+      if (token === null && rec.status !== "pending") return false;
+      byId.delete(eventId);
+      return true;
+    },
+    prune: async (_pruneOptions?: any) => 0,
+  };
 }
 
 /**
@@ -662,6 +891,25 @@ export function buildBundledChannelCore(channelId: string): Record<string, any> 
     },
     channel,
     config: { current: () => ({}) },
+    // `state` surface. The real OpenClaw runtime backs `openChannelIngressQueue`
+    // with the durable state DB; bundled channels whose gateway spools inbound
+    // (telegram's long-poll spooler) call this at runtime. We serve a stable
+    // in-memory queue per (channelId, accountId) so events enqueued on one call
+    // are visible to the subsequent list/claim/release calls (the spooler
+    // constructs a fresh queue handle per operation, so a per-call Map would
+    // silently lose state). See createInMemoryChannelIngressQueue.
+    state: {
+      openChannelIngressQueue: (options: { accountId?: string } = {}) => {
+        const accountId = (options.accountId ?? "default").toString();
+        const key = `${channelId}:${accountId}`;
+        let queue = bundledIngressQueues.get(key);
+        if (!queue) {
+          queue = createInMemoryChannelIngressQueue({ channelId, accountId });
+          bundledIngressQueues.set(key, queue);
+        }
+        return queue;
+      },
+    },
   };
 }
 

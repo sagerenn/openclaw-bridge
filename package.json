@@ -18,6 +18,7 @@
     "test:e2e:weixin": "node dist/test/e2e-test-weixin.js",
     "test:e2e:irc": "node dist/test/e2e-test-irc.js",
     "test:e2e:mattermost": "node dist/test/e2e-test-mattermost.js",
+    "test:e2e:telegram": "node dist/test/e2e-test-telegram.js",
     "patch:lark": "node dist/util/patch-lark-plugin.js",
     "postinstall": "npm run build && node dist/util/patch-lark-plugin.js || true",
     "install:liangzimixin": "npm install liangzimixin",

@@ -178,6 +178,58 @@ jobs:
         if: always()
         run: docker logs mm 2>&1 | tail -200 || true
 
+  # ─── Telegram E2E (full round-trip against the real Telegram Bot API) ────────
+  # Unlike the self-hosted IRC/Mattermost suites, Telegram cannot be run
+  # credential-free: it talks to the real api.telegram.org Bot API and a human
+  # user (the bot's /starter) must participate in the inbound leg (Telegram
+  # bots cannot be driven as a fake far-end user, and a bot cannot initiate a
+  # DM without a prior /start). So this job is opt-in: it only runs when the
+  # TELEGRAM_BOT_TOKEN secret is configured, and the inbound leg requires a
+  # human reply within the test's 120s window.
+  #
+  # Flow:
+  #   WS client ──[WebSocket]──▶ Bridge ──[telegram channel plugin]──▶ Telegram
+  # Outbound: 3 send_text messages, each verified via send_ack (the bot
+  # delivers them to the human's private chat). Inbound: a human reply to the
+  # bot is delivered back to the WS client. This validates that the bridge can
+  # load the bundled `telegram` channel plugin, route outbound through
+  # plugin.outbound, and route inbound through the plugin's long-poll gateway.
+  #
+  # The test auto-discovers the chat id from the bot's most recent /start and
+  # drains the stale update before the bridge begins long-polling, so no
+  # TELEGRAM_CHAT_ID is required.
+  e2e-telegram:
+    name: Telegram E2E (real Bot API)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Only run when a bot token is available; otherwise skip (don't fail CI).
+    if: ${{ vars.E2E_TELEGRAM_ENABLED == 'true' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      # `npm ci` runs the postinstall hook, which builds dist/ and patches the
+      # lark plugin — so dist/ is ready for the test step.
+      - name: Install
+        run: npm ci
+
+      - name: Type-check
+        run: npm run build
+
+      - name: Run Telegram E2E test
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          BRIDGE_PORT: "9500"
+          E2E_TELEGRAM_LOG_LEVEL: info
+        run: npm run test:e2e:telegram
+
   # ─── Docker (multi-arch) ────────────────────────────────────────────────────
   # Builds linux/amd64 + linux/arm64 images and publishes them. Pushes on:
   #   - main  -> :latest + :sha + :branch
