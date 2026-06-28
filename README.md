@@ -254,10 +254,28 @@ QQBOT_TARGET_ID=qqbot:c2c:<user_openid> npm run test:e2e:qqbot
 # WeChat E2E test (requires an `openclaw-weixin` section; logs in via QR scan)
 WEIXIN_SENDER_ID=<user_id>@im.wechat npm run test:e2e:weixin
 
+# IRC E2E test (credential-free — runs against a real Ergo IRC daemon)
+IRC_HOST=127.0.0.1 IRC_PORT=6667 npm run test:e2e:irc
+
+# Mattermost E2E test (runs against a real Mattermost server; provision
+# accounts first with scripts/provision-mattermost.sh)
+MATTERMOST_BOT_TOKEN=... MATTERMOST_BOT_USER_ID=... \
+MATTERMOST_SENDER_TOKEN=... MATTERMOST_SENDER_USER_ID=... \
+npm run test:e2e:mattermost
+
 # Spec URL E2E test (no channel credentials needed — verifies the live
 # AsyncAPI/OpenAPI docs and the welcome-envelope spec URLs)
 BRIDGE_CONFIG_PATH=./config.json npm run test:e2e:spec
 ```
+
+The IRC and Mattermost E2E suites are **fully credential-free and self-hosted**:
+each spins up a real IM server (an Ergo IRC daemon / the `mattermost/mattermost-preview`
+container) and exchanges 3 messages (3 outbound + 3 inbound) round-trip through
+the complete bridge pipeline. They run automatically in CI (see the `e2e-irc`
+and `e2e-mattermost` jobs in `.github/workflows/ci.yml`); locally, point them at
+any reachable IRC / Mattermost server. The other channel suites (feishu / qqbot /
+weixin / generic) require live channel credentials and real inbound traffic, so
+they are not automated in CI.
 
 ## Project Structure
 
@@ -290,7 +308,12 @@ src/
     ├── e2e-test-feishu.ts         # End-to-end test for the Feishu/Lark channel
     ├── e2e-test-qqbot.ts          # End-to-end test for the QQ Bot channel
     ├── e2e-test-weixin.ts         # End-to-end test for the WeChat channel (QR login)
+    ├── e2e-test-irc.ts            # E2E test for the IRC channel (real Ergo server, credential-free)
+    ├── e2e-test-mattermost.ts     # E2E test for the Mattermost channel (real server, credential-free)
     └── e2e-test-spec.ts           # E2E test for the live AsyncAPI/OpenAPI spec URLs
+
+scripts/
+└── provision-mattermost.sh        # Bootstraps an admin + bot + sender on a Mattermost server for E2E
 ```
 
 ## HTTP API
