@@ -690,6 +690,13 @@ The test:
 
 **Prerequisites:** A valid `config.json` with real credentials for at least one channel.
 
+The IRC and Mattermost channels also have self-contained, credential-free E2E
+suites (`npm run test:e2e:irc`, `npm run test:e2e:mattermost`) that spin up a
+real IM server and exchange 3 messages round-trip — no `config.json` needed.
+For Mattermost, provision the bot + sender accounts first with
+`scripts/provision-mattermost.sh` against a running Mattermost server. Both
+suites run automatically in GitHub Actions.
+
 ## Troubleshooting
 
 ### "No channel plugins discovered"

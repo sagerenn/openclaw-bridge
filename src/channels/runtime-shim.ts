@@ -69,15 +69,21 @@ function buildChannelShim(
 
       /**
        * Create a reply dispatcher with typing support.
-       * The `deliver` callback is the key interception point — it's called
-       * by the plugin to send outbound messages (AI replies).
        *
-       * We intercept it to route to WS clients instead of the AI pipeline.
+       * In the real runtime the `deliver` callback fires for each AI-generated
+       * reply block. Bundled channels like mattermost destructure
+       * `{ dispatcher, replyOptions, markDispatchIdle, markRunComplete }` and
+       * drive the dispatcher through `settleReplyDispatcher`/`withReplyDispatcher`.
+       *
+       * In bridge mode there is no AI: the inbound message text itself must be
+       * surfaced to WS clients. That happens in `dispatchReplyFromConfig`
+       * (below) using the ctx carried here, so `deliver` stays a passthrough
+       * that forwards plugin-originated outbound blocks to WS clients too.
        */
       createReplyDispatcherWithTyping: (opts: any) => {
         const originalDeliver = opts.deliver;
         const interceptedDeliver = async (payload: any) => {
-          // Route to WS clients via the bridge
+          // Route plugin-originated outbound blocks to WS clients via the bridge.
           onDeliver({
             text: payload?.text,
             mediaUrl: payload?.mediaUrl,
@@ -94,17 +100,55 @@ function buildChannelShim(
           }
         };
 
+        let idle = true;
+        let complete = false;
         return {
           dispatcher: {
-            waitForIdle: async () => {},
+            markComplete: () => { complete = true; },
+            waitForIdle: async () => { idle = true; },
+            // Convenience flag the plugin may read.
+            isComplete: () => complete,
           },
           replyOptions: {
             disableBlockStreaming: true,
           },
-          markDispatchIdle: () => {},
+          markDispatchIdle: () => { idle = true; },
+          markRunComplete: () => { complete = true; },
           // Override deliver with our interceptor
           _interceptedDeliver: interceptedDeliver,
         };
+      },
+
+      /**
+       * Settle a dispatcher after a dispatch run: mark it complete, drain any
+       * pending work (no-op in bridge mode), then fire onSettled. Mirrors the
+       * real runtime's settleReplyDispatcher contract used by mattermost.
+       */
+      settleReplyDispatcher: async (params: any) => {
+        params?.dispatcher?.markComplete?.();
+        try {
+          await params?.dispatcher?.waitForIdle?.();
+        } finally {
+          await params?.onSettled?.();
+        }
+      },
+
+      /**
+       * Run work under a dispatcher and always settle it (drain) before
+       * returning or throwing — mirrors the real runtime contract.
+       */
+      withReplyDispatcher: async (params: any) => {
+        try {
+          return await params.run();
+        } finally {
+          // Always settle (drain) the dispatcher before returning or throwing.
+          params?.dispatcher?.markComplete?.();
+          try {
+            await params?.dispatcher?.waitForIdle?.();
+          } finally {
+            await params?.onSettled?.();
+          }
+        }
       },
 
       /**
@@ -112,14 +156,27 @@ function buildChannelShim(
        * In the real runtime this runs the AI agent and streams the reply.
        * Here we skip the AI entirely — the bridge is a passthrough, not an AI host.
        *
-       * The plugin's gateway.startAccount() calls this to process inbound messages.
-       * Since we're not running AI, we return immediately with empty counts.
+       * Bundled channels that route inbound through the reply pipeline
+       * (mattermost) call this with `ctx` carrying the inbound message
+       * (CommandBody / RawBody / Body = text, From = sender). In bridge mode
+       * the inbound *prompt* is what WS clients want — not an AI reply — so we
+       * surface that context to onDeliver here, mirroring what
+       * `inbound.dispatchReply` does for the IRC-style path. Without this the
+       * inbound message would never reach WS clients for reply-pipeline channels.
        */
       dispatchReplyFromConfig: async (opts: any) => {
-        log.debug("dispatchReplyFromConfig called (AI dispatch skipped — bridge mode)", {
-          channelId,
-          accountId,
-        });
+        const ctx = opts?.ctx;
+        const text = ctx?.CommandBody ?? ctx?.RawBody ?? ctx?.Body ?? ctx?.body ?? ctx?.rawBody;
+        try {
+          onDeliver({
+            text: typeof text === "string" ? text : undefined,
+            accountId,
+            channelId,
+            inboundContext: ctx,
+          });
+        } catch (err: any) {
+          log.debug("onDeliver() threw in dispatchReplyFromConfig", { error: String(err) });
+        }
         return {
           counts: { final: 0, block: 0, tool: 0 },
           queuedFinal: false,
@@ -151,12 +208,6 @@ function buildChannelShim(
         minMs: 0,
         maxMs: 0,
       }),
-
-      withReplyDispatcher: async (opts: any) => {
-        if (opts.run) await opts.run();
-      },
-
-      settleReplyDispatcher: async () => {},
 
       resolveEffectiveMessagesConfig: (_cfg: any) => ({
         disableBlockStreaming: true,
@@ -277,9 +328,45 @@ function buildChannelShim(
     },
 
     // ── debounce ───────────────────────────────────────────────────────────
+    // Bundled channels (e.g. mattermost) coalesce rapid inbound posts through a
+    // debouncer: gateway code calls `debouncer.enqueue(entry)` and the debouncer
+    // later invokes `onFlush([entries])` to drive the inbound pipeline. With
+    // resolveInboundDebounceMs() returning 0 (no coalescing in bridge mode),
+    // enqueue must flush the entry immediately by calling onFlush([entry]).
+    // The earlier `{ push }` stub mismatched this contract, so mattermost's
+    // inbound handler threw `debouncer.enqueue is not a function`.
     debounce: {
-      createInboundDebouncer: () => ({ push: async () => false, dispose: () => {} }),
       resolveInboundDebounceMs: () => 0,
+      createInboundDebouncer: (params: any) => {
+        const onFlush: (entries: any[]) => Promise<void> | void = params?.onFlush ?? (async () => {});
+        const onError: (err: unknown) => void = params?.onError ?? (() => {});
+        const buildKey: (entry: any) => string | null = params?.buildKey ?? (() => "default");
+        const keyChains = new Map<string, Promise<unknown>>();
+        let disposed = false;
+        const enqueue = async (item: any): Promise<void> => {
+          if (disposed) return;
+          const key = buildKey(item) ?? "default";
+          const run = async (): Promise<void> => {
+            try {
+              await onFlush([item]);
+            } catch (err) {
+              try {
+                onError(err);
+              } catch {}
+            }
+          };
+          // Serialize per key (mirrors the real debuzzer's enqueueKeyTask):
+          // back-to-back posts in the same DM channel flush strictly in order,
+          // so the next post's handlePost/onFlush only starts after the prior
+          // one settles. Without this, concurrent flushes race the plugin's
+          // shared per-turn reply-pipeline state and hang the 2nd/3rd reply.
+          const prev = keyChains.get(key) ?? Promise.resolve();
+          const next = prev.then(run, run);
+          keyChains.set(key, next.then(() => undefined, () => undefined));
+          await next;
+        };
+        return { enqueue, dispose: () => { disposed = true; } };
+      },
     },
 
     // ── outbound ───────────────────────────────────────────────────────────
@@ -453,7 +540,49 @@ export function buildBundledChannelCore(channelId: string): Record<string, any> 
   const channel = buildChannelShim(channelId, "default", fallbackDeliver);
   channel.inbound = {
     buildContext: (opts: any) => opts,
-    run: async () => {},
+    // The real inbound.run orchestrates history/session bookkeeping then
+    // triggers the reply dispatch. Reply-pipeline channels (mattermost) pass a
+    // `runDispatch` callback that wraps dispatchReplyFromConfig. In bridge mode
+    // we skip the AI dispatch bookkeeping but MUST still invoke runDispatch so
+    // the inbound context reaches WS clients (via dispatchReplyFromConfig →
+    // onDeliver). Without this, inbound messages were silently dropped after
+    // the debouncer flushed.
+    run: async (opts: any) => {
+      // Reply-pipeline channels (mattermost) nest the dispatch trigger at
+      // adapter.resolveTurn.runDispatch (it wraps withReplyDispatcher →
+      // dispatchReplyFromConfig). Invoke it so the inbound context reaches WS
+      // clients; route failures through onPreDispatchFailure.
+      // Reply-pipeline channels (mattermost) expose the dispatch trigger via
+      // adapter.resolveTurn() — a function returning a turn object whose
+      // runDispatch() wraps withReplyDispatcher → dispatchReplyFromConfig.
+      // Resolve the turn and invoke runDispatch() so the inbound context
+      // reaches WS clients; route failures through onPreDispatchFailure.
+      let turn: any;
+      try {
+        turn = typeof opts?.adapter?.resolveTurn === "function"
+          ? await opts.adapter.resolveTurn()
+          : undefined;
+      } catch (err: any) {
+        log.debug("resolveTurn failed in bundled inbound.run", {
+          channelId,
+          error: String(err),
+        });
+      }
+      const runDispatch = turn?.runDispatch;
+      try {
+        if (typeof runDispatch === "function") {
+          await runDispatch();
+        }
+      } catch (err: any) {
+        log.debug("runDispatch failed in bundled inbound.run", {
+          channelId,
+          error: String(err),
+        });
+        try {
+          await turn?.onPreDispatchFailure?.();
+        } catch {}
+      }
+    },
     runPreparedReply: async () => {},
     dispatchReply: async (opts: any) => {
       const ctx = opts?.ctxPayload;
@@ -479,13 +608,47 @@ export function buildBundledChannelCore(channelId: string): Record<string, any> 
     },
   };
 
+  // Bundled channels that route inbound through the REPLY pipeline (e.g.
+  // mattermost) call `core.channel.reply.dispatchReplyFromConfig` rather than
+  // `core.channel.inbound.dispatchReply`. The shim's reply surface was built
+  // with the fallbackDeliver closure, so without this override inbound would be
+  // delivered to the no-op fallback (logged-and-dropped) instead of the real
+  // per-account onDeliver. Resolve the account from the dispatch opts and route
+  // to its registered deliver interceptor — mirroring inbound.dispatchReply.
+  channel.reply = {
+    ...channel.reply,
+    dispatchReplyFromConfig: async (opts: any) => {
+      const ctx = opts?.ctx;
+      const text = ctx?.CommandBody ?? ctx?.RawBody ?? ctx?.Body ?? ctx?.body ?? ctx?.rawBody;
+      const dispatchAccountId = opts?.accountId ?? opts?.ctx?.AccountId ?? ctx?.AccountId ?? "default";
+      const deliver = resolveDeliver(dispatchAccountId);
+      try {
+        deliver({
+          text: typeof text === "string" ? text : undefined,
+          accountId: dispatchAccountId,
+          channelId,
+          inboundContext: ctx,
+        });
+      } catch (err: any) {
+        log.debug("onDeliver() threw in bundled dispatchReplyFromConfig", {
+          channelId,
+          accountId: dispatchAccountId,
+          error: String(err),
+        });
+      }
+      return { counts: { final: 0, block: 0, tool: 0 }, queuedFinal: false };
+    },
+  };
+
   return {
     version: "2026.6.10",
     log: (msg: string) => log.debug("[bundled-core]", { channelId, msg }),
     error: (msg: string) => log.error("[bundled-core]", { channelId, msg }),
     logging: {
       getChildLogger: (_opts?: any) => ({
-        debug: noop,
+        debug: (m: any) => {
+          if (process.env.OPENCLAW_BRIDGE_VERBOSE === "1") log.info(`[bundled:${channelId}] ${typeof m === "string" ? m : JSON.stringify(m)}`);
+        },
         info: noop,
         warn: noop,
         error: (m: string) => log.debug(`[bundled:${channelId}]`, { msg: String(m) }),

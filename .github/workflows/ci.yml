@@ -106,6 +106,78 @@ jobs:
           BRIDGE_PORT: "9498"
         run: npm run test:e2e:irc
 
+  # ─── Mattermost E2E (full round-trip against a real self-hosted IM server) ──
+  # Mirrors e2e-irc but against a real Mattermost server. It launches the
+  # mattermost/mattermost-preview container (as a plain `docker run` so we can
+  # `docker exec` it and pass config overrides), provisions a bot + a human
+  # sender via REST (scripts/provision-mattermost.sh), then drives the test:
+  #
+  #   WS client ──[WebSocket]──▶ Bridge ──[mattermost channel plugin]──▶ Mattermost
+  # exchanging 3 messages (3 outbound + 3 inbound) round-trip. This validates
+  # that the bridge can load the bundled `mattermost` channel plugin from inside
+  # the `openclaw` package, route outbound through plugin.outbound, and route
+  # inbound through the plugin's REPLY-pipeline dispatch seam back to WS clients.
+  #
+  # The preview image disables user access tokens, bot creation, and open
+  # signup by default; we enable all three via MM_SERVICESETTINGS_* env at
+  # container start (note: the PAT setting is EnableUserAccessTokens, not
+  # EnablePersonalAccessTokens). No external SaaS or paid plan is required.
+  e2e-mattermost:
+    name: Mattermost E2E (real Mattermost server)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      # `npm ci` runs the postinstall hook, which builds dist/ and patches the
+      # lark plugin — so dist/ is ready for the test step.
+      - name: Install
+        run: npm ci
+
+      - name: Type-check
+        run: npm run build
+
+      - name: Start Mattermost preview server
+        run: |
+          set -euo pipefail
+          docker run -d --name mm \
+            -p 8065:8065 \
+            -e MM_SERVICESETTINGS_SITEURL=http://127.0.0.1:8065 \
+            -e MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS=true \
+            -e MM_SERVICESETTINGS_ENABLEBOTACCOUNTCREATION=true \
+            -e MM_SERVICESETTINGS_ALLOWUNTRUSTEDINTERNALCONNECTIONS=true \
+            -e MM_SERVICESETTINGS_ENABLEOPENSERVER=true \
+            -e MM_SERVICESETTINGS_ENABLEUSERCREATION=true \
+            -e MM_EMAILSETTINGS_SMTPSERVER= \
+            -e MM_PLUGINSETTINGS_ENABLEUPLOADS=false \
+            mattermost/mattermost-preview:latest
+
+      - name: Provision bot + sender accounts
+        env:
+          MATTERMOST_URL: http://127.0.0.1:8065
+          MM_CONTAINER: mm
+        run: |
+          source ./scripts/provision-mattermost.sh
+
+      - name: Run Mattermost round-trip E2E test (3 messages)
+        env:
+          MATTERMOST_URL: http://127.0.0.1:8065
+          BRIDGE_PORT: "9499"
+          E2E_MATTERMOST_LOG_LEVEL: info
+        run: npm run test:e2e:mattermost
+
+      - name: Dump Mattermost logs on failure
+        if: always()
+        run: docker logs mm 2>&1 | tail -200 || true
+
   # ─── Docker (multi-arch) ────────────────────────────────────────────────────
   # Builds linux/amd64 + linux/arm64 images and publishes them. Pushes on:
   #   - main  -> :latest + :sha + :branch
