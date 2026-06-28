@@ -37,8 +37,8 @@ jobs:
           node-version: "24"
           cache: npm
 
-      # `npm ci` runs the postinstall hook, which builds dist/ and patches the
-      # lark plugin — so dist/ is ready for the test step.
+      # `npm ci` installs deps; postinstall then patches the lark plugin in
+      # node_modules. We build dist/ explicitly next so the test has it.
       - name: Install
         run: npm ci
 
@@ -47,6 +47,43 @@ jobs:
 
       - name: Run spec E2E test
         run: npm run test:e2e:spec
+
+  # ─── Webhook receiver (sub-package) ─────────────────────────────────────────
+  # The standalone webhook receiver lives in webhook-receiver/ as an independent
+  # npm package (openclaw-webhook-receiver). It has its own tsconfig + lockfile
+  # and deploys to Vercel / Cloudflare / FaaS independently of the bridge.
+  # This job builds it, type-checks it, and runs its in-process round-trip suite
+  # (POST -> poll -> ack, HMAC verify, poll-bearer auth) — all credential-free.
+  webhook-receiver:
+    name: Webhook receiver
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: webhook-receiver
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: webhook-receiver/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      - name: Run round-trip test
+        run: npm run test:e2e
 
   # ─── IRC E2E (full round-trip against a real self-hosted IM server) ─────────
   # The only channel E2E suite that runs credential-free in CI: it spins up an
@@ -89,12 +126,12 @@ jobs:
           node-version: "24"
           cache: npm
 
-      # `npm ci` runs the postinstall hook, which builds dist/ and patches the
-      # lark plugin — so dist/ is ready for the test step.
+      # `npm ci` installs deps; postinstall patches the lark plugin in
+      # node_modules. dist/ is built by the explicit build step below.
       - name: Install
         run: npm ci
 
-      - name: Type-check
+      - name: Build
         run: npm run build
 
       - name: Run IRC round-trip E2E test (3 messages)
@@ -137,12 +174,12 @@ jobs:
           node-version: "24"
           cache: npm
 
-      # `npm ci` runs the postinstall hook, which builds dist/ and patches the
-      # lark plugin — so dist/ is ready for the test step.
+      # `npm ci` installs deps; postinstall patches the lark plugin in
+      # node_modules. dist/ is built by the explicit build step below.
       - name: Install
         run: npm ci
 
-      - name: Type-check
+      - name: Build
         run: npm run build
 
       - name: Start Mattermost preview server
@@ -215,12 +252,12 @@ jobs:
           node-version: "24"
           cache: npm
 
-      # `npm ci` runs the postinstall hook, which builds dist/ and patches the
-      # lark plugin — so dist/ is ready for the test step.
+      # `npm ci` installs deps; postinstall patches the lark plugin in
+      # node_modules. dist/ is built by the explicit build step below.
       - name: Install
         run: npm ci
 
-      - name: Type-check
+      - name: Build
         run: npm run build
 
       - name: Run Telegram E2E test
@@ -413,3 +450,90 @@ jobs:
           done <<< "${{ steps.meta.outputs.tags }}"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Manifest digest: \`${{ steps.manifest.outputs.manifest-digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ─── Publish (npm, provenance-signed) ───────────────────────────────────────
+  # Publishes both npm packages to the public registry on a `v*` tag push. Each
+  # package version is set explicitly (npm version) and is distinct: tag the
+  # bridge as `v1.2.3` and the receiver separately when it changes. To release
+  # the *receiver only* without a bridge version bump, push a tag matching
+  # `webhook-receiver-v*` (the bridge publish job ignores those).
+  #
+  # Both jobs require an `NPM_TOKEN` (automation scope) repo secret. Without it
+  # they're skipped rather than failing CI — set the secret to enable releases.
+  # Provenance (SLSA) is enabled via publishConfig; OIDC write permission is
+  # required for npm to attest the build.
+  #
+  # `needs:` gates keep a publish from going out if any test/E2E job fails.
+  publish-bridge:
+    name: Publish bridge to npm
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, webhook-receiver, e2e-irc, e2e-mattermost]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # Bundle sanity: confirms the tarball includes dist/ + src/ + the lark
+      # patch util the postinstall runs against node_modules.
+      - name: Verify publishable tarball
+        run: npm pack --dry-run
+
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-webhook-receiver:
+    name: Publish webhook-receiver to npm
+    # Release the receiver on either a generic `v*` tag (alongside a bridge
+    # release) or a dedicated `webhook-receiver-v*` tag.
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/webhook-receiver-v')
+    needs: [webhook-receiver]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: webhook-receiver
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: webhook-receiver/package-lock.json
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify publishable tarball
+        run: npm pack --dry-run
+
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

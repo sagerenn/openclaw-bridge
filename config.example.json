@@ -42,6 +42,20 @@
       "dmPolicy": "pairing",
       "allowFrom": ["+15551234567"],
       "_comment": "WhatsApp (@openclaw/whatsapp) links via QR — leave accounts empty and visit /plugin/whatsapp/default/qr to scan. allowFrom is E.164 numbers; dmPolicy 'pairing' lets unknown senders request access."
+    },
+    "msteams": {
+      "enabled": true,
+      "webhook": true,
+      "accounts": {
+        "default": {
+          "pollUrl": "https://your-webhook-receiver.example.com/api/webhook/TOKEN/poll",
+          "bearer": "optional-poll-bearer-matching-WH_POLL_TOKEN",
+          "pollIntervalMs": 3000,
+          "outboundUrl": "https://your-relay.example.com/send",
+          "outboundBearer": "optional-relay-bearer"
+        }
+      },
+      "_comment": "MS Teams only offers outbound webhooks, so inbound flows through the standalone webhook-receiver (../webhook-receiver/). Set webhook:true and point pollUrl at the receiver's /webhook/<token>/poll endpoint. outboundUrl is an optional relay that turns send_text into the Teams send-message API call; omit it for an inbound-only channel."
     }
   },
   "logging": {

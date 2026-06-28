@@ -3,6 +3,21 @@
   "version": "1.0.0",
   "description": "Universal WebSocket bridge server for openclaw channel plugins — dynamically loads installed plugins",
   "type": "module",
+  "license": "GPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sagerenn/openclaw-bridge.git"
+  },
+  "homepage": "https://github.com/sagerenn/openclaw-bridge#readme",
+  "bugs": { "url": "https://github.com/sagerenn/openclaw-bridge/issues" },
+  "publishConfig": { "access": "public", "provenance": true },
+  "files": [
+    "dist",
+    "src",
+    "config.example.json",
+    "README.md",
+    "LICENSE"
+  ],
   "main": "dist/server.js",
   "bin": {
     "openclaw-bridge": "dist/server.js"
@@ -21,7 +36,8 @@
     "test:e2e:telegram": "node dist/test/e2e-test-telegram.js",
     "test:e2e:whatsapp": "node dist/test/e2e-test-whatsapp.js",
     "patch:lark": "node dist/util/patch-lark-plugin.js",
-    "postinstall": "npm run build && node dist/util/patch-lark-plugin.js || true",
+    "postinstall": "node dist/util/patch-lark-plugin.js || true",
+    "postpublish": "node dist/util/patch-lark-plugin.js || true",
     "install:liangzimixin": "npm install liangzimixin",
     "install:weixin": "npm install @tencent-weixin/openclaw-weixin",
     "install:whatsapp": "npm install @openclaw/whatsapp",

@@ -1,0 +1,49 @@
+{
+  "name": "openclaw-webhook-receiver",
+  "version": "1.0.0",
+  "description": "Standalone webhook receiver for openclaw-bridge — deployable on Vercel, Cloudflare Pages, or any FaaS. Buffers inbound IM events for channels that can't hold an inbound WebSocket (e.g. MS Teams).",
+  "type": "module",
+  "license": "GPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sagerenn/openclaw-bridge.git",
+    "directory": "webhook-receiver"
+  },
+  "homepage": "https://github.com/sagerenn/openclaw-bridge/tree/main/webhook-receiver#readme",
+  "bugs": {
+    "url": "https://github.com/sagerenn/openclaw-bridge/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "files": [
+    "dist",
+    "src",
+    "vercel",
+    "cloudflare",
+    "faas",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "dist/core.js",
+  "exports": {
+    ".": "./dist/core.js",
+    "./storage": "./dist/storage.js"
+  },
+  "bin": {
+    "openclaw-webhook-receiver": "dist/server.js",
+    "openclaw-webhook-receiver-cli": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "tsc -p tsconfig.json --watch",
+    "cli": "node dist/cli.js",
+    "test:e2e": "node dist/test/roundtrip.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "^5.9.3"
+  }
+}

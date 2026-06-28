@@ -26,6 +26,7 @@ import { ClientRegistry } from "./server/client-registry.js";
 import { ChannelManager } from "./channels/channel-manager.js";
 import { loadChannelAdapters } from "./channels/plugin-loader.js";
 import { TelegramBridgeAdapter } from "./channels/telegram-adapter.js";
+import { registerWebhookAdapters } from "./channels/webhook-adapter.js";
 import { loadConfig, normalizeProxyUrl, resolveEffectiveProxy, type BridgeConfig } from "./config/schema.js";
 import { ContactStore } from "./contacts/contact-store.js";
 import { setupProxy, resolveProxyFromEnv, getActiveProxyUrl } from "./util/proxy-setup.js";
@@ -122,6 +123,14 @@ async function main(): Promise<void> {
   // plugin adapters lets it win the channelId="telegram" slot. See
   // src/channels/telegram-adapter.ts.
   channelManager.registerAdapter(new TelegramBridgeAdapter());
+
+  // Register bridge-native webhook adapters for channels whose IM platform can
+  // only push outbound webhooks (e.g. MS Teams). Each such channel section sets
+  // `webhook: true` (or its accounts carry a pollUrl); the adapter polls the
+  // standalone webhook-receiver and emits inbound to WS clients. Registered
+  // after the plugin loaders so it wins the channel-id slot. See
+  // src/channels/webhook-adapter.ts and ../webhook-receiver/.
+  registerWebhookAdapters(config, channelManager);
 
   if (adapters.size === 0) {
     log.warn("No channel plugins discovered. Install plugins with:");
