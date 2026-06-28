@@ -214,6 +214,15 @@ export interface InboundMessagePayload {
   chatId: string;
   /** Sender user ID */
   senderId: string;
+  /**
+   * Ready-to-echo reply target for this message — the exact `to` value a
+   * client should put on the `send_text` envelope to reply to the sender in
+   * the same conversation. Channel-specific (e.g. mattermost DMs use
+   * `user:<id>`, group channels use `channel:<id>`). Surfaced so clients need
+   * no per-channel target-format knowledge: echo `replyTo` verbatim. Absent
+   * when the channel doesn't provide one (clients fall back to `senderId`).
+   */
+  replyTo?: string;
   /** Sender display name (if available) */
   senderName?: string;
   /** Message type: "text" | "markdown" | "image" | "file" | "voice" | "video" | "system" */
@@ -298,6 +307,12 @@ export interface NormalizedInboundMessage {
   chatId: string;
   /** Sender user ID */
   senderId: string;
+  /**
+   * Ready-to-echo reply target (the `to` for `send_text`). See
+   * {@link InboundMessagePayload.replyTo}. Computed by the channel adapter
+   * from the inbound context (e.g. mattermost's `To` / `OriginatingTo`).
+   */
+  replyTo?: string;
   /** Sender display name */
   senderName?: string;
   /** Message type */

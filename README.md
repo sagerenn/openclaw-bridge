@@ -201,7 +201,7 @@ All messages use a JSON envelope format:
 | Type | Payload | Trigger |
 |------|---------|---------|
 | `welcome` | `{ version, channels }` | On connection |
-| `inbound_message` | `{ messageId, chatId, senderId, senderName?, msgType, text, timestamp, mediaUrl?, ... }` | Inbound message from backend |
+| `inbound_message` | `{ messageId, chatId, senderId, replyTo?, senderName?, msgType, text, timestamp, mediaUrl?, ... }` | Inbound message from backend |
 | `channel_status` | `{ status, detail?, error? }` | Status change or subscribe response |
 | `channels_list` | `{ channels: { [id]: { label, accounts: { [id]: { status, detail?, error? } } } } }` | Response to `list_channels` |
 | `send_ack` | `{ requestId, messageId? }` | Successful outbound send |
@@ -226,6 +226,20 @@ Clients must subscribe to a `channel:accountId` pair to receive inbound messages
 ```
 
 Multiple clients can subscribe to the same channel account. Each client only receives messages matching its filters.
+
+### Replying: the `replyTo` field
+
+The `send_text` payload's `to` field is a **channel-specific** target string. Rather than each client knowing each channel's format (e.g. mattermost DMs need `user:<id>`, group channels need `channel:<id>`), the bridge surfaces a ready-to-echo `replyTo` on every `inbound_message` payload. To reply to a sender, echo it verbatim:
+
+```jsonc
+// received:
+{ "type": "inbound_message", "payload": { "senderId": "abc", "replyTo": "user:abc", "text": "hi" } }
+
+// reply — use payload.replyTo as `to`:
+{ "type": "send_text", "payload": { "to": "user:abc", "text": "hello!" } }
+```
+
+`replyTo` is computed by the channel adapter from the inbound context (mattermost sets `user:<id>` for DMs, `channel:<id>` for groups; other channels set their own form). It is absent when a channel doesn't provide one — fall back to `senderId`. This is the unified reply API: clients carry no per-channel target logic.
 
 ## CLI Usage
 

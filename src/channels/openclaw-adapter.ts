@@ -414,6 +414,11 @@ export class OpenClawChannelAdapter implements ChannelAdapter {
       messageId: ctx?.messageId ?? ctx?.MessageSid ?? ctx?.MessageId ?? ctx?.id ?? `deliver-${Date.now()}`,
       chatId: ctx?.chatId ?? ctx?.ChatId ?? ctx?.peer ?? ctx?.Peer ?? ctx?.from ?? ctx?.From ?? "",
       senderId: ctx?.senderId ?? ctx?.SenderId ?? ctx?.from ?? ctx?.From ?? "",
+      // Channel-provided ready-to-echo reply target (mattermost sets `To` /
+      // `OriginatingTo` to `user:<id>` for DMs / `channel:<id>` for groups).
+      // Surfaced so clients can echo it as `send_text.to` without per-channel
+      // target-format knowledge.
+      replyTo: ctx?.replyTo ?? ctx?.ReplyTo ?? ctx?.To ?? ctx?.to ?? ctx?.OriginatingTo,
       senderName: ctx?.senderName ?? ctx?.SenderName ?? ctx?.fromName ?? ctx?.FromName,
       msgType: payload.mediaUrl || payload.mediaUrls?.length ? "media" : "text",
       text: payload.text ?? "",

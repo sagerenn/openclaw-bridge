@@ -619,6 +619,7 @@ export class BridgeServer {
       messageId: msg.messageId,
       chatId: msg.chatId,
       senderId: msg.senderId,
+      replyTo: msg.replyTo,
       senderName: msg.senderName,
       msgType: msg.msgType,
       text: msg.text,

@@ -140,6 +140,11 @@ const schemas = {
       messageId: { type: "string" },
       chatId: { type: "string" },
       senderId: { type: "string" },
+      replyTo: {
+        type: "string",
+        description:
+          "Ready-to-echo reply target — the `to` value to put on a `send_text` envelope to reply in this conversation. Channel-specific (mattermost DMs: `user:<id>`, groups: `channel:<id>`). Echo verbatim; absent means fall back to `senderId`.",
+      },
       senderName: { type: "string" },
       msgType: { type: "string", description: "text|markdown|image|file|voice|video|system" },
       text: { type: "string" },
