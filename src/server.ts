@@ -25,6 +25,7 @@ import { BridgeServer } from "./server/bridge-server.js";
 import { ClientRegistry } from "./server/client-registry.js";
 import { ChannelManager } from "./channels/channel-manager.js";
 import { loadChannelAdapters } from "./channels/plugin-loader.js";
+import { TelegramBridgeAdapter } from "./channels/telegram-adapter.js";
 import { loadConfig, normalizeProxyUrl, resolveEffectiveProxy, type BridgeConfig } from "./config/schema.js";
 import { ContactStore } from "./contacts/contact-store.js";
 import { setupProxy, resolveProxyFromEnv, getActiveProxyUrl } from "./util/proxy-setup.js";
@@ -112,6 +113,15 @@ async function main(): Promise<void> {
   for (const [channelId, adapter] of adapters) {
     channelManager.registerAdapter(adapter);
   }
+
+  // Override the bundled `telegram` adapter with the bridge-native one. The
+  // bundled openclaw telegram plugin hard-wires the real AI-agent dispatch for
+  // inbound, which never reaches WS clients (and fails without an API key);
+  // the bridge-native TelegramBridgeAdapter owns both legs via the raw Bot API
+  // and routes inbound straight to the WS seam. Registering it after the
+  // plugin adapters lets it win the channelId="telegram" slot. See
+  // src/channels/telegram-adapter.ts.
+  channelManager.registerAdapter(new TelegramBridgeAdapter());
 
   if (adapters.size === 0) {
     log.warn("No channel plugins discovered. Install plugins with:");
